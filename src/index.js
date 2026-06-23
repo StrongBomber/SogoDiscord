@@ -19,8 +19,7 @@ const db = new sqlite3.Database("./economy.db");
 
 const activeBlackjack = new Map();
 const activeWhispers = new Map(); 
-// Çekiliş verilerini hafızada yönetmek için yeni Map'ler
-const activeGiveaways = new Map();
+const activeGiveaways = new Map(); // Aktif zamanlayıcıları hafızada tutmak için
 
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users(
@@ -32,6 +31,18 @@ db.serialize(() => {
     last_daily INTEGER DEFAULT 0
   )`);
   db.run("CREATE TABLE IF NOT EXISTS inventory(userId TEXT, itemId TEXT, quantity INTEGER DEFAULT 0, PRIMARY KEY(userId, itemId))");
+  
+  // ÇEKİLİŞ SİSTEMİ İÇİN KALICI TABLO
+  db.run(`CREATE TABLE IF NOT EXISTS giveaways(
+    id TEXT PRIMARY KEY,
+    prize TEXT,
+    winnersCount INTEGER,
+    endTime INTEGER,
+    channelId TEXT,
+    messageId TEXT,
+    participants TEXT DEFAULT '[]',
+    ended INTEGER DEFAULT 0
+  )`);
 });
 
 const client = new Client({
@@ -101,55 +112,60 @@ function buildBridgeFormatRow() {
   );
 }
 
-// --- ÇEKİLİŞ BİTİRME MOTORU (YENİ) ---
+// --- ÇEKİLİŞ BİTİRME MOTORU ---
 async function endGiveaway(giveawayId, forcedClient = null) {
-  const gw = activeGiveaways.get(giveawayId);
-  if (!gw || gw.ended) return;
-  gw.ended = true;
-  if (gw.timeout) clearTimeout(gw.timeout);
-
   const activeClient = forcedClient || client;
-  const channel = await activeClient.channels.fetch(gw.channelId).catch(() => null);
-  if (!channel) return;
-
-  const msg = await channel.messages.fetch(gw.messageId).catch(() => null);
-  const participants = Array.from(gw.participants);
-
-  if (participants.length === 0) {
-    if (msg) {
-      const emptyEmbed = EmbedBuilder.from(msg.embeds[0])
-        .setColor("#ED4245")
-        .setDescription(`❌ **Çekiliş Süresi Doldu!**\n\n**Katılım Yetersiz:** Çekilişe hiç kimse katılmadığı için kazanan belirlenemedi.`)
-        .setFields([]);
-      await msg.edit({ embeds: [emptyEmbed], components: [] }).catch(() => null);
-    }
-    activeGiveaways.delete(giveawayId);
-    return;
-  }
-
-  const winnersCount = Math.min(gw.winnersCount, participants.length);
-  const winners = [];
   
-  for (let i = 0; i < winnersCount; i++) {
-    const randIdx = Math.floor(Math.random() * participants.length);
-    winners.push(participants.splice(randIdx, 1)[0]);
-  }
+  // Veritabanından güncel veriyi çekelim
+  db.get("SELECT * FROM giveaways WHERE id = ?", [giveawayId], async (err, row) => {
+    if (err || !row || row.ended === 1) return;
 
-  gw.lastWinners = winners; // Reroll için kazananları sakla
-
-  if (msg) {
-    const endEmbed = EmbedBuilder.from(msg.embeds[0])
-      .setColor("#2B2D31")
-      .setDescription(`🎉 **Çekiliş Sonuçlandı!**\n\n🎁 **Ödül:** ${gw.prize}\n👑 **Kazananlar:** ${winners.map(w => `<@${w}>`).join(", ")}\n👥 **Toplam Katılım:** \`${gw.participants.size}\``)
-      .setFields([]);
+    // Veritabanında bitti olarak işaretle
+    db.run("UPDATE giveaways SET ended = 1 WHERE id = ?", [giveawayId]);
     
-    // Sadece yetkililerin tetikleyebileceği Reroll (Yeniden Döndür) butonu ekleniyor
-    const rerollRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`gw_reroll_${giveawayId}`).setLabel("🔁 Yeniden Döndür (Reroll)").setStyle(ButtonStyle.Secondary)
-    );
-    await msg.edit({ embeds: [endEmbed], components: [rerollRow] }).catch(() => null);
-    await msg.reply({ content: `🎉 Tebrikler ${winners.map(w => `<@${w}>`).join(", ")}, **${gw.prize}** kazandınız!` }).catch(() => null);
-  }
+    const gwMemory = activeGiveaways.get(giveawayId);
+    if (gwMemory && gwMemory.timeout) clearTimeout(gwMemory.timeout);
+    activeGiveaways.delete(giveawayId);
+
+    const channel = await activeClient.channels.fetch(row.channelId).catch(() => null);
+    if (!channel) return;
+
+    const msg = await channel.messages.fetch(row.messageId).catch(() => null);
+    const participants = JSON.parse(row.participants || "[]");
+
+    if (participants.length === 0) {
+      if (msg) {
+        const emptyEmbed = EmbedBuilder.from(msg.embeds[0])
+          .setColor("#ED4245")
+          .setDescription(`❌ **Çekiliş Süresi Doldu!**\n\n**Katılım Yetersiz:** Çekilişe hiç kimse katılmadığı için kazanan belirlenemedi.`)
+          .setFields([]);
+        await msg.edit({ embeds: [emptyEmbed], components: [] }).catch(() => null);
+      }
+      return;
+    }
+
+    const winnersCount = Math.min(row.winnersCount, participants.length);
+    const winners = [];
+    const pool = [...participants];
+    
+    for (let i = 0; i < winnersCount; i++) {
+      const randIdx = Math.floor(Math.random() * pool.length);
+      winners.push(pool.splice(randIdx, 1)[0]);
+    }
+
+    if (msg) {
+      const endEmbed = EmbedBuilder.from(msg.embeds[0])
+        .setColor("#2B2D31")
+        .setDescription(`🎉 **Çekiliş Sonuçlandı!**\n\n🎁 **Ödül:** ${row.prize}\n👑 **Kazananlar:** ${winners.map(w => `<@${w}>`).join(", ")}\n👥 **Toplam Katılım:** \`${participants.length}\``)
+        .setFields([]);
+      
+      const rerollRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`gw_reroll_${giveawayId}`).setLabel("🔁 Yeniden Döndür (Reroll)").setStyle(ButtonStyle.Secondary)
+      );
+      await msg.edit({ embeds: [endEmbed], components: [rerollRow] }).catch(() => null);
+      await msg.reply({ content: `🎉 Tebrikler ${winners.map(w => `<@${w}>`).join(", ")}, **${row.prize}** kazandınız!` }).catch(() => null);
+    }
+  });
 }
 
 // --- ASENKRON VERİTABANI YARDIMCILARI ---
@@ -206,6 +222,7 @@ function addXp(id, amount) {
   });
 }
 
+// --- ENVANTER FONKSİYONLARI ---
 function getInventory(userId) {
   return new Promise((resolve, reject) => { db.all("SELECT * FROM inventory WHERE userId = ? AND quantity > 0", [userId], (err, rows) => { if (err) return reject(err); resolve(rows || []); }); });
 }
@@ -273,7 +290,7 @@ const backButtonRow = new ActionRowBuilder().addComponents(
   new ButtonBuilder().setCustomId("back_to_main").setLabel("⬅️ Ana Menüye Dön").setStyle(ButtonStyle.Secondary)
 );
 
-// --- SLASH KOMUT KAYIT MOTORU ---
+// --- SLASH KOMUT KAYIT MOTORU VE ÇEKİLİŞ RESUME ---
 client.on("ready", async () => {
   console.log(`🤖 Bot ${client.user.tag} olarak başarıyla başlatıldı!`);
   try {
@@ -284,8 +301,29 @@ client.on("ready", async () => {
       }
     ]);
     console.log("✅ Slash komutları Discord API'sine başarıyla senkronize edildi.");
+
+    // BOT AÇILDIĞINDA YARIM KALAN AKTİF ÇEKİLİŞLERİ GERİ YÜKLEME MOTORU
+    db.all("SELECT * FROM giveaways WHERE ended = 0", [], async (err, rows) => {
+      if (err || !rows) return;
+      const now = Date.now();
+      for (const row of rows) {
+        const msRemaining = row.endTime - now;
+        if (msRemaining <= 0) {
+          // Bot kapalıyken süresi dolmuş, anında bitir
+          await endGiveaway(row.id);
+        } else {
+          // Kalan süreyi hesapla ve zamanlayıcıyı tekrar kur
+          const timeout = setTimeout(() => {
+            endGiveaway(row.id);
+          }, msRemaining);
+          activeGiveaways.set(row.id, { timeout });
+        }
+      }
+      console.log(`🎉 [KORUMA] ${rows.length} adet aktif çekiliş veritabanından başarıyla geri yüklendi.`);
+    });
+
   } catch (error) {
-    console.error("❌ Slash komutları kaydedilirken hata oluştu:", error);
+    console.error("❌ Başlatma motorunda hata oluştu:", error);
   }
 });
 
@@ -375,7 +413,7 @@ client.on("interactionCreate", async interaction => {
     if (interaction.customId === "hunt_house_nav") {
       const inv = await getInventory(userId);
       const embed = new EmbedBuilder().setColor("#E67E22").setTitle("🥩 Av İşleme ve Kasap Atölyesi")
-        .setDescription("Avladığınız çiğ hayvanları burada satabilir, mutfakta pişirebilir/işleyebilir ya da yiyerek yüksek miktarda tecrübe puanı (XP) elde edebilirsiniz!");
+        .setDescription("Avladığınız çiğ hayvanları burada satabilir, mutfakta pişirebilir/işleyebilir ya da yiyerek yüksek miktarda tecrbe puanı (XP) elde edebilirsiniz!");
 
       const options = [];
       inv.forEach(row => {
@@ -456,13 +494,13 @@ client.on("interactionCreate", async interaction => {
       const row4 = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("mod_timeout_btn").setLabel("⏳ Sürgün (Timeout)").setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId("mod_whisper_btn").setLabel("🤫 Fısıltı Odası").setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId("mod_giveaway_nav").setLabel("🎉 Çekiliş Düzenle").setStyle(ButtonStyle.Success) // ÇEKİLİŞ NAVİGASYON
+        new ButtonBuilder().setCustomId("mod_giveaway_nav").setLabel("🎉 Çekiliş Düzenle").setStyle(ButtonStyle.Success)
       );
 
       return interaction.update({ embeds: [embed], components: [row1, row2, row3, row4, backButtonRow] });
     }
 
-    // --- 🎉 ÇEKİLİŞ TETİKLEYİCİLERİ VE YÖNETİM BUTONLARI (YENİ) ---
+    // --- 🎉 ÇEKİLİŞ BUTON AKSİYONLARI ---
     if (interaction.customId === "mod_giveaway_nav") {
       if (!interaction.member.permissions.has(PermissionFlagsBits.ManageEvents) && !interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
         return interaction.reply({ content: "❌ Çekiliş düzenlemek için **Etkinlikleri Yönet** veya **Yönetici** yetkiniz olmalıdır.", ephemeral: true });
@@ -477,77 +515,95 @@ client.on("interactionCreate", async interaction => {
       return interaction.showModal(modal);
     }
 
-    // Çekilişe Katılma Butonu
+    // Çekilişe Katılma / Ayrılma Butonu
     if (interaction.customId.startsWith("gw_join_")) {
       const giveawayId = interaction.customId.replace("gw_join_", "");
-      const gw = activeGiveaways.get(giveawayId);
-      if (!gw || gw.ended) return interaction.reply({ content: "❌ Bu çekiliş süresi dolmuş veya iptal edilmiş.", ephemeral: true });
+      
+      db.get("SELECT * FROM giveaways WHERE id = ?", [giveawayId], async (err, row) => {
+        if (err || !row) return interaction.reply({ content: "❌ Çekiliş veritabanında bulunamadı.", ephemeral: true });
+        if (row.ended === 1) return interaction.reply({ content: "❌ Bu çekiliş zaten sonuçlanmış veya iptal edilmiş.", ephemeral: true });
 
-      if (gw.participants.has(userId)) {
-        gw.participants.delete(userId);
-        interaction.reply({ content: "↩️ Çekilişten katılımınızı geri çektiniz.", ephemeral: true });
-      } else {
-        gw.participants.add(userId);
-        interaction.reply({ content: "✅ Çekilişe başarıyla katıldınız! Şansınız bol olsun.", ephemeral: true });
-      }
+        let participants = JSON.parse(row.participants || "[]");
+        const userIndex = participants.indexOf(userId);
+        let isAdded = false;
 
-      // Ana embed katılım sayısını canlı güncelle
-      const channel = await client.channels.fetch(gw.channelId).catch(() => null);
-      if (channel) {
-        const msg = await channel.messages.fetch(gw.messageId).catch(() => null);
-        if (msg && msg.embeds[0]) {
-          const updatedEmbed = EmbedBuilder.from(msg.embeds[0]).setFields([{ name: "👥 Katılımcı Sayısı", value: `\`${gw.participants.size}\` Üye`, inline: true }]);
-          await msg.edit({ embeds: [updatedEmbed] }).catch(() => null);
+        if (userIndex > -1) {
+          participants.splice(userIndex, 1);
+        } else {
+          participants.push(userId);
+          isAdded = true;
         }
-      }
+
+        db.run("UPDATE giveaways SET participants = ? WHERE id = ?", [JSON.stringify(participants), giveawayId], async (err) => {
+          if (err) return interaction.reply({ content: "❌ İşlem sırasında bir veritabanı hatası oluştu.", ephemeral: true });
+
+          await interaction.reply({ 
+            content: isAdded ? "✅ Çekilişe başarıyla katıldınız! Şansınız bol olsun." : "↩️ Çekilişten katılımınızı geri çektiniz.", 
+            ephemeral: true 
+          }).catch(() => null);
+
+          // Ana embed katılım sayısını canlı güncelleme
+          const channel = await client.channels.fetch(row.channelId).catch(() => null);
+          if (channel) {
+            const msg = await channel.messages.fetch(row.messageId).catch(() => null);
+            if (msg && msg.embeds[0]) {
+              const updatedEmbed = EmbedBuilder.from(msg.embeds[0]).setFields([{ name: "👥 Katılımcı Sayısı", value: `\`${participants.length}\` Üye`, inline: true }]);
+              await msg.edit({ embeds: [updatedEmbed] }).catch(() => null);
+            }
+          }
+        });
+      });
       return;
     }
 
-    // Ephemeral Panel: Çekiliş İptal Etme
+    // Çekiliş İptal Etme (Yönetici)
     if (interaction.customId.startsWith("gw_ctrl_cancel_")) {
       const giveawayId = interaction.customId.replace("gw_ctrl_cancel_", "");
-      const gw = activeGiveaways.get(giveawayId);
-      if (!gw) return interaction.reply({ content: "❌ Çekiliş zaten bulunamadı.", ephemeral: true });
-
-      if (gw.timeout) clearTimeout(gw.timeout);
       
-      const channel = await client.channels.fetch(gw.channelId).catch(() => null);
-      if (channel) {
-        const msg = await channel.messages.fetch(gw.messageId).catch(() => null);
-        if (msg) {
-          const cancelEmbed = EmbedBuilder.from(msg.embeds[0]).setColor("#ED4245").setDescription("🛑 **Bu çekiliş yetkili tarafından iptal edilmiştir.**").setFields([]);
-          await msg.edit({ embeds: [cancelEmbed], components: [] }).catch(() => null);
-        }
-      }
+      db.get("SELECT * FROM giveaways WHERE id = ?", [giveawayId], async (err, row) => {
+        if (err || !row) return interaction.reply({ content: "❌ Çekiliş bulunamadı.", ephemeral: true });
 
-      activeGiveaways.delete(giveawayId);
-      return interaction.update({ content: "🛑 Çekiliş tamamen iptal edildi ve ana mesaj kapatıldı.", embeds: [], components: [] });
+        db.run("UPDATE giveaways SET ended = 1 WHERE id = ?", [giveawayId]);
+        const gwMemory = activeGiveaways.get(giveawayId);
+        if (gwMemory && gwMemory.timeout) clearTimeout(gwMemory.timeout);
+        activeGiveaways.delete(giveawayId);
+
+        const channel = await client.channels.fetch(row.channelId).catch(() => null);
+        if (channel) {
+          const msg = await channel.messages.fetch(row.messageId).catch(() => null);
+          if (msg) {
+            const cancelEmbed = EmbedBuilder.from(msg.embeds[0]).setColor("#ED4245").setDescription("🛑 **Bu çekiliş yetkili tarafından iptal edilmiştir.**").setFields([]);
+            await msg.edit({ embeds: [cancelEmbed], components: [] }).catch(() => null);
+          }
+        }
+        return interaction.update({ content: "🛑 Çekiliş tamamen iptal edildi ve ana mesaj kapatıldı.", embeds: [], components: [] });
+      });
+      return;
     }
 
-    // Ephemeral Panel: Çekilişi Anında Bitir
+    // Çekilişi Anında Sonlandır (Yönetici)
     if (interaction.customId.startsWith("gw_ctrl_force_")) {
       const giveawayId = interaction.customId.replace("gw_ctrl_force_", "");
-      const gw = activeGiveaways.get(giveawayId);
-      if (!gw || gw.ended) return interaction.reply({ content: "❌ Çekiliş zaten bitmiş veya bulunamadı.", ephemeral: true });
-
       await endGiveaway(giveawayId);
       return interaction.update({ content: "⚡ Çekiliş süresi beklenmeden anında sonlandırıldı!", embeds: [], components: [] });
     }
 
-    // Yeniden Döndürme (Reroll) Butonu Eylemi
+    // Çekiliş Yeniden Döndürme (Reroll)
     if (interaction.customId.startsWith("gw_reroll_")) {
       if (!interaction.member.permissions.has(PermissionFlagsBits.ManageEvents) && !interaction.member.permissions.has(PermissionFlagsBits.Administrator)) {
         return interaction.reply({ content: "❌ Reroll yapmak için **Etkinlikleri Yönet** yetkiniz olmalıdır.", ephemeral: true });
       }
       const giveawayId = interaction.customId.replace("gw_reroll_", "");
-      const gw = activeGiveaways.get(giveawayId);
-      if (!gw) return interaction.reply({ content: "❌ Bu çekilişin verilerine ulaşılamadı (Bot yeniden başlamış olabilir).", ephemeral: true });
+      
+      db.get("SELECT * FROM giveaways WHERE id = ?", [giveawayId], async (err, row) => {
+        if (err || !row) return interaction.reply({ content: "❌ Çekiliş verilerine ulaşılamadı.", ephemeral: true });
 
-      const participants = Array.from(gw.participants);
-      if (participants.length === 0) return interaction.reply({ content: "❌ Çekilişe kimse katılmadığı için yeniden döndürülemez.", ephemeral: true });
+        const participants = JSON.parse(row.participants || "[]");
+        if (participants.length === 0) return interaction.reply({ content: "❌ Çekilişe katılım olmadığı için yeniden döndürülemez.", ephemeral: true });
 
-      const newWinner = participants[Math.floor(Math.random() * participants.length)];
-      await interaction.reply({ content: `🔁 **Yeniden Döndürme Başarılı!**\n🎁 Yeni Şanslı Talihli: <@${newWinner}>! Tebrikler!` });
+        const newWinner = participants[Math.floor(Math.random() * participants.length)];
+        return interaction.reply({ content: `🔁 **Yeniden Döndürme Başarılı!**\n🎁 Yeni Şanslı Talihli: <@${newWinner}>! Tebrikler!` });
+      });
       return;
     }
 
@@ -752,40 +808,34 @@ client.on("interactionCreate", async interaction => {
       const targetId = interaction.values[0];
       return interaction.showModal(new ModalBuilder().setCustomId(`modal_timeout_submit_${targetId}`).setTitle("Sürgün Süresi").addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("timeout_time").setLabel("Süre (Dakika)").setStyle(TextInputStyle.Short).setRequired(true)), new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("timeout_reason").setLabel("Sebep").setStyle(TextInputStyle.Short).setValue("Kural İhlali"))));
     }
-    if (interaction.customId === "menu_untimeout_user") {
-      const targetId = interaction.values[0]; const member = await interaction.guild.members.fetch(targetId).catch(() => null); if (!member) return interaction.update({ embeds: [new EmbedBuilder().setTitle("❌ Bulunamadı")], components: [backButtonRow] });
-      await member.timeout(null); return interaction.update({ embeds: [new EmbedBuilder().setColor("#57F287").setTitle("🔊 Sürgün Kaldırıldı")], components: [backButtonRow] });
-    }
   }
 
   // --- MODAL SUBMIT (FORM MOTORU) ---
   if (interaction.isModalSubmit()) {
 
-    // 🎉 ÇEKİLİŞ KURULUM FORM SUBMIT ALANI (YENİ)
+    // 🎉 ÇEKİLİŞ KURULUM FORM SUBMIT
     if (interaction.customId === "modal_giveaway_setup") {
       const prize = interaction.fields.getTextInputValue("gw_prize");
       const winnersCount = parseInt(interaction.fields.getTextInputValue("gw_winners")) || 1;
-      const dateStr = interaction.fields.getTextInputValue("gw_date"); // Örn: 24/06
-      const timeStr = interaction.fields.getTextInputValue("gw_time"); // Örn: 18:00
+      const dateStr = interaction.fields.getTextInputValue("gw_date"); 
+      const timeStr = interaction.fields.getTextInputValue("gw_time"); 
 
       try {
         const [day, month] = dateStr.split("/").map(Number);
         const [hour, minute] = timeStr.split(":").map(Number);
         const currentYear = new Date().getFullYear();
 
-        // Girilen parametrelerle hedef tarih objesini inşa etme
         const targetDate = new Date(currentYear, month - 1, day, hour, minute, 0);
         const now = new Date();
 
         if (isNaN(targetDate.getTime()) || targetDate <= now) {
-          return interaction.reply({ content: "❌ Hata: Geçersiz veya geçmiş bir tarih/saat girdiniz! Lütfen kontrol edin.", ephemeral: true });
+          return interaction.reply({ content: "❌ Hata: Geçersiz veya geçmiş bir tarih/saat girdiniz!", ephemeral: true });
         }
 
         const msRemaining = targetDate.getTime() - now.getTime();
         const timestampSeconds = Math.floor(targetDate.getTime() / 1000);
         const giveawayId = `gw_${Date.now()}`;
 
-        // Herkesin görebileceği Katılım Embed Mesajı
         const giveawayEmbed = new EmbedBuilder()
           .setColor("#5865F2")
           .setTitle("🎉 ÇEKİLİŞ BAŞLADI 🎉")
@@ -798,29 +848,24 @@ client.on("interactionCreate", async interaction => {
           new ButtonBuilder().setCustomId(`gw_join_${giveawayId}`).setLabel("🎉 Katıl / Ayrıl").setStyle(ButtonStyle.Primary)
         );
 
-        // Kanala çekilişi yolla
         const publicMessage = await interaction.channel.send({ embeds: [giveawayEmbed], components: [joinRow] });
 
-        // Zamanlayıcıyı kur
+        // Veritabanına kaydet
+        db.run("INSERT INTO giveaways(id, prize, winnersCount, endTime, channelId, messageId, participants, ended) VALUES(?, ?, ?, ?, ?, ?, ?, 0)", 
+          [giveawayId, prize, winnersCount, targetDate.getTime(), interaction.channelId, publicMessage.id, JSON.stringify([])],
+          (err) => {
+            if (err) console.error("Çekiliş veritabanına kaydedilemedi:", err);
+          }
+        );
+
+        // Zamanlayıcıyı başlat
         const timeout = setTimeout(() => {
           endGiveaway(giveawayId);
         }, msRemaining);
 
-        // Çekiliş verilerini haritaya yaz
-        const gwData = {
-          id: giveawayId,
-          prize,
-          winnersCount,
-          endTime: targetDate.getTime(),
-          channelId: interaction.channelId,
-          messageId: publicMessage.id,
-          participants: new Set(),
-          timeout,
-          ended: false
-        };
-        activeGiveaways.set(giveawayId, gwData);
+        activeGiveaways.set(giveawayId, { timeout });
 
-        // SADECE BİZDE GÖZÜKEN (Ephemeral) Yönetim Paneli
+        // Ephemeral Kontrol Paneli
         const controlEmbed = new EmbedBuilder()
           .setColor("#E67E22")
           .setTitle("🛠️ Çekiliş Yönetim Masası")
@@ -835,7 +880,7 @@ client.on("interactionCreate", async interaction => {
 
       } catch (err) {
         console.error(err);
-        return interaction.reply({ content: "❌ Çekiliş oluşturulurken bir hata meydana geldi.", ephemeral: true });
+        return interaction.reply({ content: "❌ Çekiliş oluşturulurken teknik bir hata meydana geldi.", ephemeral: true });
       }
     }
     
