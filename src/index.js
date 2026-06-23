@@ -39,8 +39,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds, 
     GatewayIntentBits.GuildMessages, 
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages // DM yanıtlarını yakalamak için eklendi
+    GatewayIntentBits.MessageContent
   ]
 });
 
@@ -78,6 +77,31 @@ function formatCoins(amount) {
 
 function getRequiredXp(level) {
   return level * 350;
+}
+
+// --- FISILTI PANELİ YARDIMCILARI (YENİ) ---
+function buildBridgeEmbed(logs, targetId) {
+  const logText = logs.length > 0 ? logs.join("\n") : "*Henüz bir mesaj geçmişi yok...*";
+  return new EmbedBuilder()
+    .setColor("#9B59B6")
+    .setTitle("🤫 Canlı Anonim Fısıltı Paneli")
+    .setDescription(`**Hedef Kullanıcı:** <@${targetId}>\n\n**💬 Sohbet Geçmişi:**\n${logText}`)
+    .setFooter({ text: "Bu paneli sadece siz görebilirsiniz. Sürekli etkileşimde token yenilenir." })
+    .setTimestamp();
+}
+
+function buildBridgeButtons() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("wh_bridge_reply").setLabel("✍️ Mesaj Gönder").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("wh_bridge_close").setLabel("🔒 Odayı Kapat").setStyle(ButtonStyle.Danger)
+  );
+}
+
+function buildBridgeFormatRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("wh_bridge_fmt_normal").setLabel("📝 Normal Yazı").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("wh_bridge_fmt_embed").setLabel("🖼️ Embed Mesaj").setStyle(ButtonStyle.Success)
+  );
 }
 
 // --- ASENKRON VERİTABANI YARDIMCILARI ---
@@ -181,7 +205,7 @@ async function getMainMenuEmbed(userId) {
   return new EmbedBuilder()
     .setColor("#2b2d31")
     .setTitle("🤖 Devasa RPG & Eğlence İstasyonu")
-    .setDescription("Karakterinizi geliştirin, ormanda vahşi hayvanları avlayın volatile veya lüks yemekler hazırlayın!")
+    .setDescription("Karakterinizi geliştirin, ormanda vahşi hayvanları avlayın veya lüks yemekler hazırlayın!")
     .addFields(
       { name: "👤 Profil Detayları", value: `🌟 **Seviye:** ${user.level}\n✨ **XP:** ${user.xp}/${getRequiredXp(user.level)}`, inline: true },
       { name: "💰 Finansal Durum", value: `💵 **Cüzdan:** ${formatCoins(user.coins)} Jeton\n⚔️ **Silah:** ${activeItem}`, inline: true }
@@ -217,52 +241,23 @@ client.on("ready", async () => {
   }
 });
 
-// --- KOMUT, FEVRİ VE KÖPRÜ MESAJ MOTORU ---
+// --- MESAJ YAKALAYICI (THREAD -> PANEL GÜNCELLEME) ---
 client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
 
-  // 1. KÖPRÜ: HEDEF KULLANICI FISILTI ODASINA YAZDIĞINDA (Thread -> DM)
+  // HEDEF KULLANICI GİZLİ ODAYA YAZDIĞINDA (Thread -> Ephemeral Panel Canlı Güncelleme)
   if (msg.channel.isThread() && activeWhispers.has(msg.channel.id)) {
     const bridge = activeWhispers.get(msg.channel.id);
     if (msg.author.id === bridge.targetId) {
-      const initiator = await client.users.fetch(bridge.initiatorId).catch(() => null);
-      if (initiator) {
-        const embed = new EmbedBuilder()
-          .setColor("#9B59B6")
-          .setTitle("✉️ Fısıltı Odasından Mesaj Geldi")
-          .setDescription(`> ${msg.content}`)
-          .setFooter({ text: "Bu mesaja doğrudan DM'den yanıt vererek anonim cevap yollayabilirsiniz. Kapatmak için: !kapat" })
-          .setTimestamp();
-        await initiator.send({ embeds: [embed] }).catch(() => null);
+      bridge.logs.push(`👤 **Karşı Taraf:** ${msg.content}`);
+      
+      // Sadece sen görebilirsin panelini canlı olarak güncelle
+      if (bridge.lastInteraction) {
+        await bridge.lastInteraction.editReply({
+          embeds: [buildBridgeEmbed(bridge.logs, bridge.targetId)],
+          components: [buildBridgeButtons()]
+        }).catch(() => null); // Token eskimişse hata fırlatmasını engeller
       }
-    }
-    return;
-  }
-
-  // 2. KÖPRÜ: BAŞLATAN YETKİLİ DM'DEN YANIT VERDİĞİNDE (DM -> Thread)
-  if (!msg.guild && activeWhispers.has(msg.author.id)) {
-    const bridge = activeWhispers.get(msg.author.id);
-
-    // Oturumu kapatma komutu kontrolü
-    if (msg.content.trim() === "!kapat") {
-      const thread = await client.channels.fetch(bridge.threadId).catch(() => null);
-      if (thread) {
-        await thread.send({ content: "🔒 *Bu fısıltı odası yetkili tarafından kapatıldı.*" }).catch(() => null);
-        await thread.setArchived(true).catch(() => null);
-      }
-      activeWhispers.delete(bridge.threadId);
-      activeWhispers.delete(msg.author.id);
-      return msg.reply("🔒 Fısıltı odası kapatıldı ve köprü güvenle imha edildi.");
-    }
-
-    const thread = await client.channels.fetch(bridge.threadId).catch(() => null);
-    if (thread) {
-      await thread.send({ content: `💬 **Gelen Yanıt:** ${msg.content}` });
-      await msg.react("✅").catch(() => null);
-    } else {
-      activeWhispers.delete(bridge.threadId);
-      activeWhispers.delete(msg.author.id);
-      return msg.reply("❌ Fısıltı odası bulunamadı veya silinmiş.");
     }
     return;
   }
@@ -336,7 +331,7 @@ client.on("interactionCreate", async interaction => {
     if (interaction.customId === "hunt_house_nav") {
       const inv = await getInventory(userId);
       const embed = new EmbedBuilder().setColor("#E67E22").setTitle("🥩 Av İşleme ve Kasap Atölyesi")
-        .setDescription("Avladığınız çiğ hayvanları burada satabilir, mutfakta pişirebilir/işleyebilir ya da yiyerek yüksek miktarda tecrbe puanı (XP) elde edebilirsiniz!");
+        .setDescription("Avladığınız çiğ hayvanları burada satabilir, mutfakta pişirebilir/işleyebilir ya da yiyerek yüksek miktarda tecrübe puanı (XP) elde edebilirsiniz!");
 
       const options = [];
       inv.forEach(row => {
@@ -466,10 +461,56 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ embeds: [embed], components: [row1, row2, row3, row4, backButtonRow] });
     }
 
-    // MODERASYON FORMAT BUTONLARI (FISILTI İÇİN ÖZEL)
+    // CANLI PANEL: REPLİ BUTTON TETİKLEMESİ (Sohbet Esnasında Tekrar Format Seçme Alanı)
+    if (interaction.customId === "wh_bridge_reply") {
+      const bridge = activeWhispers.get(userId);
+      if (!bridge) return interaction.reply({ content: "❌ Aktif fısıltı odası bulunamadı veya kapatılmış.", ephemeral: true });
+
+      // Paneli format seçme ekranına dönüştür
+      return interaction.update({
+        embeds: [new EmbedBuilder().setColor("#9B59B6").setTitle("🤫 Gönderim Formatı Seçin").setDescription("Göndereceğiniz yeni mesajın biçimini belirleyin:")],
+        components: [buildBridgeFormatRow()]
+      });
+    }
+
+    // CANLI PANELİNDEN GELEN FORMAT SEÇİMLERİ (Döngüsel Yapı)
+    if (interaction.customId.startsWith("wh_bridge_fmt_")) {
+      const type = interaction.customId.replace("wh_bridge_fmt_", "");
+      const modal = new ModalBuilder()
+        .setCustomId(`modal_wh_reply_submit_${type}`)
+        .setTitle(type === "normal" ? "Normal Yazı Yanıtı" : "Embed Formatında Yanıt");
+
+      modal.addComponents(new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId("whisper_reply_msg").setLabel("Fısıltı Cevabınız").setStyle(TextInputStyle.Paragraph).setRequired(true)
+      ));
+      return interaction.showModal(modal);
+    }
+
+    // CANLI PANEL: KAPANMA BUTONU TETİKLEMESİ
+    if (interaction.customId === "wh_bridge_close") {
+      const bridge = activeWhispers.get(userId);
+      if (!bridge) return interaction.reply({ content: "❌ Aktif fısıltı odası bulunamadı.", ephemeral: true });
+
+      const thread = await client.channels.fetch(bridge.threadId).catch(() => null);
+      if (thread) {
+        await thread.send({ content: "🔒 *Bu fısıltı odası yetkili tarafından kapatıldı.*" }).catch(() => null);
+        await thread.setArchived(true).catch(() => null);
+      }
+
+      activeWhispers.delete(bridge.threadId);
+      activeWhispers.delete(userId);
+
+      return interaction.update({
+        content: "🔒 Fısıltı odası başarıyla kapatıldı ve bağlantı köprüsü imha edildi.",
+        embeds: [],
+        components: []
+      });
+    }
+
+    // İLK KURULUM FORMAT BUTONLARI
     if (interaction.customId.startsWith("whfmt_")) {
       const parts = interaction.customId.split("_");
-      const type = parts[1]; // "normal" veya "embed"
+      const type = parts[1]; 
       const targetId = parts[2];
 
       const modal = new ModalBuilder()
@@ -685,7 +726,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (interaction.customId === "shop_buy_select") {
-      const id = interaction.values[0]; const it = ITEMS[id]; const u = await getUser(userId);
+      const id = interaction.values[0]; const it = ITEMS[id]; const u = await getUser(uId);
       if (u.coins < it.price) return interaction.update({ embeds: [new EmbedBuilder().setTitle("Yetersiz Bakiye")], components: [backButtonRow] });
       await addCoins(userId, -it.price); await addItem(userId, id);
       return interaction.update({ embeds: [new EmbedBuilder().setTitle("Başarılı").setDescription(`${it.name} satın alındı.`)], components: [backButtonRow] });
@@ -702,7 +743,7 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ embeds: [new EmbedBuilder().setTitle("Sandbox").setDescription(`<@${target}> Parası: ${formatCoins(tu.coins)}`)], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`sb_edit_${target}`).setLabel("Düzenle").setStyle(ButtonStyle.Danger)), backButtonRow] });
     }
 
-    // FISILTI KULLANICI SEÇİMİNDEN SONRA FORMAT EKRANI
+    // FISILTI KULLANICI SEÇİMİNDEN SONRA FORMAT EKRANI (EPHEMERAL KORUMALI)
     if (interaction.customId === "menu_whisper_user") {
       const targetId = interaction.values[0];
       const embed = new EmbedBuilder()
@@ -715,7 +756,8 @@ client.on("interactionCreate", async interaction => {
         new ButtonBuilder().setCustomId(`whfmt_embed_${targetId}`).setLabel("🖼️ Embed Mesaj").setStyle(ButtonStyle.Success)
       );
 
-      return interaction.update({ embeds: [embed], components: [formatRow, backButtonRow] });
+      // Ana menüyü bozmamak için fısıltı kurulum adımlarını 'ephemeral' (Sadece sen görebilirsin) olarak başlatıyoruz
+      return interaction.reply({ embeds: [embed], components: [formatRow], ephemeral: true });
     }
 
     // KICK / BAN / TIMEOUT AKSİYONLARI
@@ -752,10 +794,11 @@ client.on("interactionCreate", async interaction => {
 
   // --- MODAL SUBMIT (FORM GÖNDERİMLERİ) ---
   if (interaction.isModalSubmit()) {
-    // MODERASYON: FISILTI ODASI OLUŞTURMA MOTORU (YENİLENEN ANA KISIM)
+    
+    // ODA İLK KURULUM MODAL SUBMIT MOTORU
     if (interaction.customId.startsWith("modal_wh_submit_")) {
       const parts = interaction.customId.split("_");
-      const formatType = parts[3]; // "normal" veya "embed"
+      const formatType = parts[3]; 
       const targetId = parts[4];
       const msgText = interaction.fields.getTextInputValue("whisper_msg");
 
@@ -763,41 +806,85 @@ client.on("interactionCreate", async interaction => {
       if (!member) return interaction.reply({ content: "❌ Üye sunucuda bulunamadı.", ephemeral: true });
 
       try {
-        // Tamamen rastgele bir oda ismi kullanarak yetkilinin adını gizliyoruz
         const thread = await interaction.channel.threads.create({
           name: `🤫 gizli-fısıltı-${Math.floor(1000 + Math.random() * 9000)}`,
           autoArchiveDuration: 60,
-          type: 12, // Private Thread (Özel Alt Başlık)
-          reason: `Anonim İletişim Köprüsü`
+          type: 12, // Private Thread
+          reason: `Anonim İletişim`
         });
 
-        // Odaya SADECE hedef kullanıcıyı davet ediyoruz, başlatıcı eklenmiyor (Anonimlik)
         await thread.members.add(targetId);
 
-        // Mesajı tercih edilen formatta odaya yolluyoruz
         if (formatType === "normal") {
           await thread.send({ content: `🔔 **Yeni bir anonim fısıltı mesajı aldınız!**\n\n${msgText}` });
         } else {
-          const userEmbed = new EmbedBuilder()
-            .setColor("#9B59B6")
-            .setTitle("🤫 Anonim Fısıltı Mesajı")
-            .setDescription(msgText)
-            .setTimestamp();
+          const userEmbed = new EmbedBuilder().setColor("#9B59B6").setTitle("🤫 Anonim Fısıltı Mesajı").setDescription(msgText).setTimestamp();
           await thread.send({ content: `<@${targetId}>`, embeds: [userEmbed] });
         }
 
-        // Çift taraflı eşleşmeyi haritaya (Map) kaydediyoruz
-        activeWhispers.set(thread.id, { initiatorId: interaction.user.id, targetId: targetId });
-        activeWhispers.set(interaction.user.id, { threadId: thread.id, targetId: targetId });
+        // İlk log kaydını ekle
+        const initialLogs = [`✍️ **Siz (${formatType === "normal" ? "Yazı" : "Embed"}):** ${msgText}`];
 
-        return interaction.reply({ content: `✅ Anonim fısıltı odası başarıyla açıldı ve ilk mesaj iletildi! Karşı taraf odaya yazdığında bot size DM'den bildirecek. Cevap vermek için bota DM atabilirsiniz. Oturumu kapatmak için DM'ye \`!kapat\` yazmanız yeterlidir.`, ephemeral: true });
+        const bridgeObject = {
+          initiatorId: userId,
+          targetId: targetId,
+          threadId: thread.id,
+          logs: initialLogs,
+          lastInteraction: interaction // Canlı güncelleme için bu modal token'ı saklanır
+        };
+
+        activeWhispers.set(thread.id, bridgeObject);
+        activeWhispers.set(userId, bridgeObject);
+
+        // "Sadece sen görebilirsin" Canlı Sohbet Panelini (Dashboard) Gönder
+        return interaction.reply({
+          embeds: [buildBridgeEmbed(initialLogs, targetId)],
+          components: [buildBridgeButtons()],
+          ephemeral: true
+        });
+
       } catch (err) {
         console.error(err);
-        return interaction.reply({ content: "❌ Fısıltı odası açılamadı. Botun bu kanalda 'Alt Başlıkları Yönet' yetkisi olmalıdır.", ephemeral: true });
+        return interaction.reply({ content: "❌ Oda açılamadı. Botun 'Alt Başlıkları Yönet' yetkisi olmalı.", ephemeral: true });
       }
     }
 
-    // DİĞER MODALLER
+    // CANLI PANEL SOHBET ESNASINDA YANIT VERME MODAL SUBMIT MOTORU (DÖNGÜSEL YAPI)
+    if (interaction.customId.startsWith("modal_wh_reply_submit_")) {
+      const type = interaction.customId.replace("modal_wh_reply_submit_", "");
+      const msgText = interaction.fields.getTextInputValue("whisper_reply_msg");
+
+      const bridge = activeWhispers.get(userId);
+      if (!bridge) return interaction.reply({ content: "❌ Aktif fısıltı odası bulunamadı veya kapatılmış.", ephemeral: true });
+
+      const thread = await client.channels.fetch(bridge.threadId).catch(() => null);
+      if (!thread) {
+        activeWhispers.delete(bridge.threadId);
+        activeWhispers.delete(userId);
+        return interaction.reply({ content: "❌ Fısıltı odası silinmiş veya erişilemez durumda.", ephemeral: true });
+      }
+
+      // Seçilen format türüne göre odaya anonim olarak mesajı yolla
+      if (type === "normal") {
+        await thread.send({ content: `💬 **Gelen Yanıt:** ${msgText}` });
+      } else {
+        const replyEmbed = new EmbedBuilder().setColor("#9B59B6").setTitle("💬 Gelen Yanıt").setDescription(msgText).setTimestamp();
+        await thread.send({ embeds: [replyEmbed] });
+      }
+
+      // Log sistemini güncelle
+      bridge.logs.push(`✍️ **Siz (${type === "normal" ? "Yazı" : "Embed"}):** ${msgText}`);
+      bridge.lastInteraction = interaction; // En son modal submit token'ını güncelliyoruz, böylece 15 dakika süresi sıfırlanır!
+
+      // Paneli en güncel haliyle "Sadece sen görebilirsin" olarak tekrar bas
+      return interaction.reply({
+        embeds: [buildBridgeEmbed(bridge.logs, bridge.targetId)],
+        components: [buildBridgeButtons()],
+        ephemeral: true
+      });
+    }
+
+    // DİĞER STANDART MODALLER
     if (interaction.customId === "modal_purge") {
       const amount = parseInt(interaction.fields.getTextInputValue("purge_amount"));
       if (isNaN(amount) || amount < 1 || amount > 100) return interaction.reply({ content: "❌ Geçersiz miktar.", ephemeral: true });
@@ -826,7 +913,7 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ embeds: [new EmbedBuilder().setTitle("Bakiye Güncellendi")], components: [backButtonRow] });
     }
 
-    // KUMAR MODAL MATEMATİKLERİ
+    // KUMAR MATEMATİKLERİ
     const user = await getUser(userId); const bet = parseInt(interaction.fields.getTextInputValue("bet_amount"));
     if (isNaN(bet) || bet < 100 || user.coins < bet) return interaction.update({ embeds: [new EmbedBuilder().setTitle("❌ Hatalı Bahis")], components: [backButtonRow] });
     const embed = new EmbedBuilder().setTimestamp();
