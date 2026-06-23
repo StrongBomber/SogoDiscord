@@ -1,3 +1,0 @@
-git add -f .env
-git commit -m "Add .env"
-git push
