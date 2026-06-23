@@ -33,7 +33,21 @@ const ITEMS = {
   pickaxe: { name: "⛏️ Saf Altın Kazma", price: 1000, desc: "Çalışma (Work) ödüllerini %50 artırır.", type: "work" }
 };
 
-// --- ASENKRON VERİBATANI YARDIMCI FONKSİYONLARI ---
+// --- DİNAMİK BAKİYE BİÇİMLENDİRME FONKSİYONU ---
+function formatCoins(amount) {
+  // Eğer bakiye milyonluksa ve son 3 hanesi sıfırsa (Kısa gösterime uygunsa)
+  if (amount >= 1000000 && amount % 1000 === 0) {
+    return `${amount / 1000000}M`;
+  }
+  // Eğer bakiye binlikse ve tam sıfırlarla bitiyorsa (Örn: 50,000 -> 50K)
+  if (amount >= 1000 && amount % 1000 === 0) {
+    return `${amount / 1000}K`;
+  }
+  // Küsuratlıysa direkt virgüllü gösterir (Örn: 1,128,898)
+  return amount.toLocaleString("en-US");
+}
+
+// --- ASENKRON VERİTABANI YARDIMCI FONKSİYONLARI ---
 function ensureUser(id) {
   return new Promise((resolve, reject) => {
     db.get("SELECT * FROM users WHERE id = ?", [id], (err, row) => {
@@ -114,7 +128,7 @@ function getMainMenuEmbed() {
       { name: "⚙️ Genel Komutlar", value: "Sunucu ve kullanıcı istatistikleri.", inline: true },
       { name: "🛠️ Sandbox Modu", value: "Yöneticiler için bakiye kontrol merkezi.", inline: true }
     )
-    .setFooter({ text: "Gelişmiş Altyapı v3.0" })
+    .setFooter({ text: "Gelişmiş Altyapı v3.5" })
     .setTimestamp();
 }
 
@@ -168,7 +182,7 @@ client.on("interactionCreate", async interaction => {
         .setTitle("🪙 Ekonomi & RPG Dünyası")
         .setDescription("Buradan çalışabilir, avlanabilir, marketten alışveriş yapabilir veya paranızı katlayabilirsiniz.")
         .addFields(
-          { name: "💰 Bakiyeniz", value: `**${user ? user.coins : 0}** Jeton`, inline: true },
+          { name: "💰 Bakiyeniz", value: `**${formatCoins(user ? user.coins : 0)}** Jeton`, inline: true },
           { name: "🔰 Kuşanılan Eşya", value: `**${activeItem}**`, inline: true }
         );
 
@@ -217,7 +231,7 @@ client.on("interactionCreate", async interaction => {
 
       const userSelect = new UserSelectMenuBuilder()
         .setCustomId("sandbox_user_select")
-        .setPlaceholder("Biy oyuncu seçin...");
+        .setPlaceholder("Bir oyuncu seçin...");
 
       return interaction.update({ embeds: [embed], components: [new ActionRowBuilder().addComponents(userSelect), backButtonRow] });
     }
@@ -295,8 +309,8 @@ client.on("interactionCreate", async interaction => {
       const embed = new EmbedBuilder()
         .setColor("#57F287")
         .setTitle(title)
-        .setDescription(`Hesabınıza **+${reward}** jeton eklendi.${multiplierActive ? "\n*(Kuşanılan eşya sayesinde %50 bonus!)*" : ""}`)
-        .addFields({ name: "Güncel Bakiye", value: `💰 ${updatedUser.coins} jeton` });
+        .setDescription(`Hesabınıza **+${formatCoins(reward)}** jeton eklendi.${multiplierActive ? "\n*(Kuşanılan eşya sayesinde %50 bonus!)*" : ""}`)
+        .addFields({ name: "Güncel Bakiye", value: `💰 ${formatCoins(updatedUser.coins)} jeton` });
 
       return interaction.update({ embeds: [embed], components: [backButtonRow] });
     }
@@ -332,8 +346,8 @@ client.on("interactionCreate", async interaction => {
       const embed = new EmbedBuilder().setColor("#5865F2").setTitle("🛒 Alışveriş Pazarı").setDescription("Kuşanılan eşyalar meslek kazançlarınızı kalıcı olarak arttırır.");
       const options = [];
       for (const [id, item] of Object.entries(ITEMS)) {
-        embed.addFields({ name: `${item.name} - 💰 ${item.price} Jeton`, value: item.desc });
-        options.push({ label: item.name.split(" ").slice(1).join(" "), description: `${item.price} Jeton`, value: id });
+        embed.addFields({ name: `${item.name} - 💰 ${formatCoins(item.price)} Jeton`, value: item.desc });
+        options.push({ label: item.name.split(" ").slice(1).join(" "), description: `${formatCoins(item.price)} Jeton`, value: id });
       }
       const selectMenu = new StringSelectMenuBuilder().setCustomId("shop_buy_select").setPlaceholder("Satın almak için bir eşya seçin...").addOptions(options);
       return interaction.update({ embeds: [embed], components: [new ActionRowBuilder().addComponents(selectMenu), backButtonRow] });
@@ -387,7 +401,7 @@ client.on("interactionCreate", async interaction => {
       const item = ITEMS[itemId];
       const user = await getUser(userId);
       if (user.coins < item.price) {
-        return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("❌ Yetersiz Bakiye").setDescription(`Gerekli: **${item.price}** | Sizde: **${user.coins}**`)], components: [backButtonRow] });
+        return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("❌ Yetersiz Bakiye").setDescription(`Gerekli: **${formatCoins(item.price)}** | Sizde: **${formatCoins(user.coins)}**`)], components: [backButtonRow] });
       }
       await addCoins(userId, -item.price);
       await addItem(userId, itemId);
@@ -410,7 +424,7 @@ client.on("interactionCreate", async interaction => {
     const embed = new EmbedBuilder()
       .setColor("#ED4245")
       .setTitle("🛠️ Sandbox: Oyuncu Bilgisi")
-      .setDescription(`Seçilen Kullanıcı: <@${targetUserId}>\n🆔 ID: \`${targetUserId}\`\n\n💵 Güncel Parası: **${targetUser.coins}** Jeton`);
+      .setDescription(`Seçilen Kullanıcı: <@${targetUserId}>\n🆔 ID: \`${targetUserId}\`\n\n💵 Güncel Parası: **${formatCoins(targetUser.coins)}** Jeton`);
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`sb_edit_${targetUserId}`).setLabel("✍️ Bakiyeyi Düzenle").setStyle(ButtonStyle.Danger)
@@ -438,7 +452,7 @@ client.on("interactionCreate", async interaction => {
       const embed = new EmbedBuilder()
         .setColor("#57F287")
         .setTitle("🛠️ Sandbox: İşlem Başarılı")
-        .setDescription(`<@${targetId}> isimli kullanıcının yeni bakiyesi **${newAmount}** jeton olarak güncellendi!`);
+        .setDescription(`<@${targetId}> isimli kullanıcının yeni bakiyesi **${formatCoins(newAmount)}** jeton olarak güncellendi!`);
 
       return interaction.update({ embeds: [embed], components: [backButtonRow] });
     }
@@ -452,7 +466,7 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("❌ Geçersiz Bahis").setDescription("Bahis en az 100 jeton olmalıdır.")], components: [backButtonRow] });
     }
     if (user.coins < bet) {
-      return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("❌ Yetersiz Bakiye").setDescription(`Bakiyeniz yetersiz. Mevcut: **${user.coins}**`)], components: [backButtonRow] });
+      return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("❌ Yetersiz Bakiye").setDescription(`Bakiyeniz yetersiz. Mevcut: **${formatCoins(user.coins)}**`)], components: [backButtonRow] });
     }
 
     const embed = new EmbedBuilder().setTimestamp();
@@ -463,10 +477,10 @@ client.on("interactionCreate", async interaction => {
 
       if (chosenSide === systemResult) {
         await addCoins(userId, bet);
-        embed.setColor("#57F287").setTitle("🪙 Coinflip: Kazandınız!").setDescription(`Tahmin: **${chosenSide}** | Gelen: **${systemResult}**\n\nHesabınıza **+${bet}** eklendi.`);
+        embed.setColor("#57F287").setTitle("🪙 Coinflip: Kazandınız!").setDescription(`Tahmin: **${chosenSide}** | Gelen: **${systemResult}**\n\nHesabınıza **+${formatCoins(bet)}** eklendi.`);
       } else {
         await addCoins(userId, -bet);
-        embed.setColor("#ED4245").setTitle("🪙 Coinflip: Kaybettiniz!").setDescription(`Tahmin: **${chosenSide}** | Gelen: **${systemResult}**\n\nHesabınızdan **-${bet}** düştü.`);
+        embed.setColor("#ED4245").setTitle("🪙 Coinflip: Kaybettiniz!").setDescription(`Tahmin: **${chosenSide}** | Gelen: **${systemResult}**\n\nHesabınızdan **-${formatCoins(bet)}** düştü.`);
       }
     }
 
@@ -480,19 +494,19 @@ client.on("interactionCreate", async interaction => {
       if (s1 === s2 && s2 === s3) {
         const prize = bet * 3;
         await addCoins(userId, prize);
-        embed.setColor("#57F287").setTitle("🍒 Slot: JACKPOT!").setDescription(`### ${display}\n\nÜçü de eşleşti! **+${prize}** kazandınız.`);
+        embed.setColor("#57F287").setTitle("🍒 Slot: JACKPOT!").setDescription(`### ${display}\n\nÜçü de eşleşti! **+${formatCoins(prize)}** kazandınız.`);
       } else if (s1 === s2 || s1 === s3 || s2 === s3) {
         const prize = Math.floor(bet * 0.5);
         await addCoins(userId, prize);
-        embed.setColor("#57F287").setTitle("🍒 Slot: Kazandınız!").setDescription(`### ${display}\n\nİki sembol eşleşti! **+${prize}** kazandınız.`);
+        embed.setColor("#57F287").setTitle("🍒 Slot: Kazandınız!").setDescription(`### ${display}\n\nİki sembol eşleşti! **+${formatCoins(prize)}** kazandınız.`);
       } else {
         await addCoins(userId, -bet);
-        embed.setColor("#ED4245").setTitle("🍒 Slot: Kaybettiniz!").setDescription(`### ${display}\n\nHiçbiri eşleşmedi. **-${bet}** kaybettiniz.`);
+        embed.setColor("#ED4245").setTitle("🍒 Slot: Kaybettiniz!").setDescription(`### ${display}\n\nHiçbiri eşleşmedi. **-${formatCoins(bet)}** kaybettiniz.`);
       }
     }
 
     const updatedUser = await getUser(userId);
-    embed.addFields({ name: "Yeni Bakiyeniz", value: `💰 **${updatedUser.coins}** Jeton` });
+    embed.addFields({ name: "Yeni Bakiyeniz", value: `💰 **${formatCoins(updatedUser.coins)}** Jeton` });
     return interaction.update({ embeds: [embed], components: [backButtonRow] });
   }
 });
