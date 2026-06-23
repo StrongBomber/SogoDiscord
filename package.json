@@ -1,13 +1,17 @@
 {
-  "name": "owo-style-bot",
+  "name": "discord-economy-bot",
   "version": "1.0.0",
-  "main": "src/index.js",
+  "description": "Kapsamlı Discord Ekonomi Botu",
+  "main": "index.js",
+  "type": "module",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
   "dependencies": {
-    "discord.js": "^14.21.0",
-    "dotenv": "^16.6.1",
-    "sqlite3": "^5.1.7"
+    "discord.js": "^14.15.3",
+    "mongoose": "^8.4.1",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.4.5"
   }
 }
