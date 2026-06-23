@@ -2,7 +2,7 @@ require("dotenv").config();
 const { 
   Client, 
   GatewayIntentBits, 
-  Partials, // DM takibi için eklendi
+  Partials, 
   ActionRowBuilder, 
   ButtonBuilder, 
   ButtonStyle, 
@@ -20,9 +20,9 @@ const client = new Client({
     GatewayIntentBits.Guilds, 
     GatewayIntentBits.GuildMessages, 
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages // DM mesajlarını yakalamak için eklendi
+    GatewayIntentBits.DirectMessages 
   ],
-  partials: [Partials.Channel, Partials.Message] // Önbellekte olmayan DM kutuları için eklendi
+  partials: [Partials.Channel, Partials.Message] 
 });
 
 const activeWhispers = new Map(); 
@@ -157,18 +157,24 @@ client.on("interactionCreate", async interaction => {
       return interaction.showModal(modal);
     }
 
+    // --- ODA / OTURUM KAPATMA TETİKLEYİCİSİ ---
     if (interaction.customId === "wh_bridge_close") {
       const bridge = activeWhispers.get(userId); 
       if (!bridge) return interaction.reply({ content: "❌ Aktif fısıltı odası bulunamadı.", ephemeral: true });
       
+      // Oda Yöntemi Seçilmişse (Thread)
       if (bridge.method === "thread") {
         const thread = await client.channels.fetch(bridge.threadId).catch(() => null);
         if (thread) { 
-          await thread.send({ content: "🔒 *Bu fısıltı odası kapatıldı.*" }).catch(() => null); 
-          await thread.setArchived(true).catch(() => null); 
+          // Hedef kullanıcıyı thread'den atıyoruz
+          await thread.members.remove(bridge.targetId).catch(() => null);
+          // Odayı sunucudan tamamen siliyoruz
+          await thread.delete().catch(() => null); 
         }
         activeWhispers.delete(bridge.threadId); 
-      } else if (bridge.method === "dm") {
+      } 
+      // DM Yöntemi Seçilmişse
+      else if (bridge.method === "dm") {
         const targetUser = await client.users.fetch(bridge.targetId).catch(() => null);
         if (targetUser) {
           await targetUser.send({ content: "🔒 *Fısıltı oturumu kapatıldı.*" }).catch(() => null);
@@ -177,7 +183,7 @@ client.on("interactionCreate", async interaction => {
       }
       
       activeWhispers.delete(userId);
-      return interaction.update({ content: "🔒 Fısıltı odası/oturumu başarıyla kapatıldı.", embeds: [], components: [] });
+      return interaction.update({ content: "🔒 Fısıltı odası tamamen silindi ve oturum kapatıldı.", embeds: [], components: [] });
     }
 
     if (interaction.customId.startsWith("whmethod_")) {
@@ -322,7 +328,7 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
-    // Panele Yazılan Yanıtlar Gönderildiğinde (Hem Oda hem DM'i destekler)
+    // Panele Yazılan Yanıtlar Gönderildiğinde
     if (interaction.customId.startsWith("modal_wh_reply_submit_")) {
       const type = interaction.customId.replace("modal_wh_reply_submit_", ""); 
       const msgText = interaction.fields.getTextInputValue("whisper_reply_msg");
