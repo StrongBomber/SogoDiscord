@@ -1,92 +1,229 @@
-
 require("dotenv").config();
-const {Client,GatewayIntentBits,ActionRowBuilder,ButtonBuilder,ButtonStyle} = require("discord.js");
-const sqlite3=require("sqlite3").verbose();
+const { 
+  Client, 
+  GatewayIntentBits, 
+  ActionRowBuilder, 
+  ButtonBuilder, 
+  ButtonStyle, 
+  EmbedBuilder, 
+  StringSelectMenuBuilder 
+} = require("discord.js");
+const sqlite3 = require("sqlite3").verbose();
 
-const db=new sqlite3.Database("./economy.db");
+const db = new sqlite3.Database("./economy.db");
 
-db.serialize(()=>{
-db.run("CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, coins INTEGER DEFAULT 0)");
+db.serialize(() => {
+  db.run("CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, coins INTEGER DEFAULT 0)");
 });
 
-const client=new Client({
- intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMessages,GatewayIntentBits.MessageContent]
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
-function ensureUser(id){
- return new Promise(resolve=>{
-  db.get("SELECT * FROM users WHERE id=?",[id],(e,row)=>{
-   if(row) resolve(row);
-   else{
-    db.run("INSERT INTO users(id,coins) VALUES(?,0)",[id],()=>resolve({id,coins:0}));
-   }
+// Asenkron Veritabanı Yardımcı Fonksiyonları
+function ensureUser(id) {
+  return new Promise((resolve, reject) => {
+    db.get("SELECT * FROM users WHERE id = ?", [id], (err, row) => {
+      if (err) return reject(err);
+      if (row) resolve(row);
+      else {
+        db.run("INSERT INTO users(id, coins) VALUES(?, 100)", [id], (err) => {
+          if (err) return reject(err);
+          resolve({ id, coins: 100 });
+        });
+      }
+    });
   });
- });
 }
 
-client.on("messageCreate",async msg=>{
- if(msg.author.bot) return;
- if(msg.content==="!menu"){
-  const row=new ActionRowBuilder().addComponents(
-   new ButtonBuilder().setCustomId("hunt").setLabel("🏹 Hunt").setStyle(ButtonStyle.Primary),
-   new ButtonBuilder().setCustomId("work").setLabel("💼 Work").setStyle(ButtonStyle.Success),
-   new ButtonBuilder().setCustomId("beg").setLabel("🙏 Beg").setStyle(ButtonStyle.Secondary),
-   new ButtonBuilder().setCustomId("balance").setLabel("💰 Balance").setStyle(ButtonStyle.Danger)
+function addCoins(id, amount) {
+  return new Promise((resolve, reject) => {
+    db.run("UPDATE users SET coins = coins + ? WHERE id = ?", [amount, id], (err) => {
+      if (err) return reject(err);
+      resolve();
+    });
+  });
+}
+
+// Ortak Arayüz Bileşenleri
+function getMainMenuEmbed() {
+  return new EmbedBuilder()
+    .setColor("#2b2d31")
+    .setTitle("🪙 Ekonomi & Eğlence Merkezi")
+    .setDescription("Aşağıdaki butonları kullanarak işlerinizi yönetebilir, mini oyunlar oynayabilir veya kumar salonunda şansınızı deneyebilirsiniz!")
+    .addFields(
+      { name: "🏹 Avlan", value: "Vahşi doğada ava çık.", inline: true },
+      { name: "💼 Çalış", value: "Günlük mesai yap.", inline: true },
+      { name: "🙏 Dilen", value: "Şansını sokakta dene.", inline: true }
+    )
+    .setFooter({ text: "Gelişmiş Ekonomi Sistemi" })
+    .setTimestamp();
+}
+
+function getMainMenuComponents() {
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("hunt").setLabel("🏹 Avlan").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("work").setLabel("💼 Çalış").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId("beg").setLabel("🙏 Dilen").setStyle(ButtonStyle.Secondary)
   );
-  return msg.reply({content:"Economy Menu",components:[row]});
- }
 
- if(!msg.content.startsWith("!")) return;
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("gamble_menu").setLabel("🎰 Kumar Salonu").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId("balance").setLabel("💰 Bakiye Kontrol").setStyle(ButtonStyle.Secondary)
+  );
 
- const cmd=msg.content.slice(1).toLowerCase();
+  return [row1, row2];
+}
 
- if(cmd==="balance"){
-   const u=await ensureUser(msg.author.id);
-   return msg.reply(`Coins: ${u.coins}`);
- }
+const backButtonRow = new ActionRowBuilder().addComponents(
+  new ButtonBuilder().setCustomId("back_to_main").setLabel("⬅️ Ana Menüye Dön").setStyle(ButtonStyle.Secondary)
+);
 
- if(cmd==="hunt"){
-   await ensureUser(msg.author.id);
-   const reward=Math.floor(Math.random()*150)+50;
-   db.run("UPDATE users SET coins=coins+? WHERE id=?",[reward,msg.author.id]);
-   return msg.reply(`🏹 +${reward} coins`);
- }
+// Mesaj Komutları
+client.on("messageCreate", async msg => {
+  if (msg.author.bot) return;
 
- if(cmd==="work"){
-   await ensureUser(msg.author.id);
-   const reward=Math.floor(Math.random()*300)+100;
-   db.run("UPDATE users SET coins=coins+? WHERE id=?",[reward,msg.author.id]);
-   return msg.reply(`💼 +${reward} coins`);
- }
-
- if(cmd==="beg"){
-   await ensureUser(msg.author.id);
-   const reward=Math.floor(Math.random()*50)+1;
-   db.run("UPDATE users SET coins=coins+? WHERE id=?",[reward,msg.author.id]);
-   return msg.reply(`🙏 Someone gave you ${reward} coins`);
- }
+  if (msg.content === "!menu") {
+    await ensureUser(msg.author.id);
+    return msg.reply({
+      embeds: [getMainMenuEmbed()],
+      components: getMainMenuComponents()
+    });
+  }
 });
 
-client.on("interactionCreate",async interaction=>{
- if(!interaction.isButton()) return;
+// Etkileşim (Button & Select Menu) Yönetimi
+client.on("interactionCreate", async interaction => {
+  const userId = interaction.user.id;
+  await ensureUser(userId);
 
- await ensureUser(interaction.user.id);
+  // 1. BUTON ETKİLEŞİMLERİ
+  if (interaction.isButton()) {
+    
+    if (interaction.customId === "back_to_main") {
+      return interaction.update({
+        embeds: [getMainMenuEmbed()],
+        components: getMainMenuComponents()
+      });
+    }
 
- const rewards={hunt:[50,200],work:[100,350],beg:[1,50]};
+    if (interaction.customId === "balance") {
+      db.get("SELECT coins FROM users WHERE id = ?", [userId], (_, row) => {
+        const embed = new EmbedBuilder()
+          .setColor("#5865F2")
+          .setTitle("💰 Hesap Cüzdanı")
+          .setDescription(`Mevcut bakiyeniz: **${row.coins}** jeton.`)
+          .setTimestamp();
 
- if(interaction.customId==="balance"){
-  db.get("SELECT * FROM users WHERE id=?",[interaction.user.id],(_,u)=>{
-   interaction.reply({content:`💰 ${u.coins} coins`,ephemeral:true});
-  });
-  return;
- }
+        interaction.update({ embeds: [embed], components: [backButtonRow] });
+      });
+      return;
+    }
 
- if(rewards[interaction.customId]){
-  const [a,b]=rewards[interaction.customId];
-  const reward=Math.floor(Math.random()*(b-a))+a;
-  db.run("UPDATE users SET coins=coins+? WHERE id=?",[reward,interaction.user.id]);
-  interaction.reply(`Earned ${reward} coins!`);
- }
+    // Kazanma mekanikleri
+    const rewards = { hunt: [50, 200, "🏹 Av Başarılı!"], work: [100, 400, "💼 Mesai Tamamlandı!"], beg: [5, 50, "🙏 Birileri Üç Beş Kuruş Attı!"] };
+
+    if (rewards[interaction.customId]) {
+      const [min, max, title] = rewards[interaction.customId];
+      const reward = Math.floor(Math.random() * (max - min + 1)) + min;
+      
+      await addCoins(userId, reward);
+      const user = await ensureUser(userId);
+
+      const embed = new EmbedBuilder()
+        .setColor("#57F287")
+        .setTitle(title)
+        .setDescription(`Hesabınıza **+${reward}** jeton eklendi.`)
+        .addFields({ name: "Güncel Bakiye", value: `💰 ${user.coins} jeton` })
+        .setTimestamp();
+
+      return interaction.update({ embeds: [embed], components: [backButtonRow] });
+    }
+
+    if (interaction.customId === "gamble_menu") {
+      const embed = new EmbedBuilder()
+        .setColor("#FEE75C")
+        .setTitle("🎰 Kumar Salonuna Hoş Geldiniz")
+        .setDescription("Lütfen oynamak istediğiniz oyunu aşağıdaki menüden seçin.\n\n⚠️ **Not:** Tüm oyunların giriş bedeli sabit **50 jetondur**.");
+
+      const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId("gamble_select")
+        .setPlaceholder("Bir oyun seçimi yapın...")
+        .addOptions([
+          { label: "Yazı Tura (Coinflip)", description: "%50 şansla paranı katla.", value: "coinflip", emoji: "🪙" },
+          { label: "Slot Makinesi (Slots)", description: Sembolleri eşleştir, büyük ödülü kap.", value: "slots", emoji: "🍒" }
+        ]);
+
+      const row = new ActionRowBuilder().addComponents(selectMenu);
+      return interaction.update({ embeds: [embed], components: [row, backButtonRow] });
+    }
+  }
+
+  // 2. SEÇİM MENÜSÜ ETKİLEŞİMLERİ
+  if (interaction.isStringSelectMenu() && interaction.customId === "gamble_select") {
+    const user = await ensureUser(userId);
+    const bet = 50;
+
+    if (user.coins < bet) {
+      const embed = new EmbedBuilder()
+        .setColor("#ED4245")
+        .setTitle("❌ Yetersiz Bakiye")
+        .setDescription(`Kumar oynamak için en az **${bet}** jetonunuz olmalıdır.\nMevcut bakiyeniz: **${user.coins}** jeton.`);
+
+      return interaction.update({ embeds: [embed], components: [backButtonRow] });
+    }
+
+    const gameType = interaction.values[0];
+    const embed = new EmbedBuilder().setTimestamp();
+
+    if (gameType === "coinflip") {
+      const win = Math.random() < 0.5;
+      if (win) {
+        await addCoins(userId, bet); // Ödediği 50 hariç net +50 kazanç için (+100 verip -50 düşmek yerine direkt +50 ekliyoruz)
+        embed.setColor("#57F287")
+             .setTitle("🪙 Yazı-Tura: Kazandınız!")
+             .setDescription(`Para döndü ve doğru tahmin ettiniz! **+${bet}** jeton kazandınız.`);
+      } else {
+        await addCoins(userId, -bet);
+        embed.setColor("#ED4245")
+             .setTitle("🪙 Yazı-Tura: Kaybettiniz!")
+             .setDescription(`Para döndü ancak yanlış yüzü geldi. **-${bet}** jeton kaybettiniz.`);
+      }
+    } 
+    
+    else if (gameType === "slots") {
+      const emojis = ["🍎", "🍋", "🍒", "💎"];
+      const s1 = emojis[Math.floor(Math.random() * emojis.length)];
+      const s2 = emojis[Math.floor(Math.random() * emojis.length)];
+      const s3 = emojis[Math.floor(Math.random() * emojis.length)];
+
+      const slotDisplay = `┃  ${s1}  ┃  ${s2}  ┃  ${s3}  ┃`;
+
+      if (s1 === s2 && s2 === s3) {
+        const jackpot = bet * 4;
+        await addCoins(userId, jackpot);
+        embed.setColor("#57F287")
+             .setTitle("🍒 Slot: JACKPOT!")
+             .setDescription(`### ${slotDisplay}\n\nMüthiş! Tüm semboller eşleşti. **+${jackpot}** jeton kazandınız!`);
+      } else if (s1 === s2 || s1 === s3 || s2 === s3) {
+        const smallWin = bet;
+        await addCoins(userId, smallWin);
+        embed.setColor("#57F287")
+             .setTitle("🍒 Slot: Kazandınız!")
+             .setDescription(`### ${slotDisplay}\n\nGüzel! İki sembol aynı geldi. **+${smallWin}** jeton kazandınız.`);
+      } else {
+        await addCoins(userId, -bet);
+        embed.setColor("#ED4245")
+             .setTitle("🍒 Slot: Kaybettiniz!")
+             .setDescription(`### ${slotDisplay}\n\nTüh! Hiçbir sembol eşleşmedi. **-${bet}** jeton kaybettiniz.`);
+      }
+    }
+
+    const updatedUser = await ensureUser(userId);
+    embed.addFields({ name: "Yeni Bakiyeniz", value: `💰 ${updatedUser.coins} jeton` });
+
+    return interaction.update({ embeds: [embed], components: [backButtonRow] });
+  }
 });
 
 client.login(process.env.DISCORD_TOKEN);
