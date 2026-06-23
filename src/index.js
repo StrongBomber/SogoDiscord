@@ -825,15 +825,16 @@ client.on("interactionCreate", async interaction => {
         const [hour, minute] = timeStr.split(":").map(Number);
         const currentYear = new Date().getFullYear();
 
-        const targetDate = new Date(currentYear, month - 1, day, hour, minute, 0);
-        const now = new Date();
+        // 🎯 Girdiyi mutlak UTC olarak hesaplayıp, Türkiye (UTC+3) saat farkını milisaniye cinsinden düşüyoruz.
+        const targetMs = Date.UTC(currentYear, month - 1, day, hour, minute, 0) - (3 * 60 * 60 * 1000);
+        const nowMs = Date.now();
+        const msRemaining = targetMs - nowMs;
 
-        if (isNaN(targetDate.getTime()) || targetDate <= now) {
+        if (isNaN(targetMs) || msRemaining <= 0) {
           return interaction.reply({ content: "❌ Hata: Geçersiz veya geçmiş bir tarih/saat girdiniz!", ephemeral: true });
         }
 
-        const msRemaining = targetDate.getTime() - now.getTime();
-        const timestampSeconds = Math.floor(targetDate.getTime() / 1000);
+        const timestampSeconds = Math.floor(targetMs / 1000);
         const giveawayId = `gw_${Date.now()}`;
 
         const giveawayEmbed = new EmbedBuilder()
@@ -850,15 +851,15 @@ client.on("interactionCreate", async interaction => {
 
         const publicMessage = await interaction.channel.send({ embeds: [giveawayEmbed], components: [joinRow] });
 
-        // Veritabanına kaydet
+        // Veritabanına mutlak doğru milisaniyeyi (targetMs) kaydediyoruz
         db.run("INSERT INTO giveaways(id, prize, winnersCount, endTime, channelId, messageId, participants, ended) VALUES(?, ?, ?, ?, ?, ?, ?, 0)", 
-          [giveawayId, prize, winnersCount, targetDate.getTime(), interaction.channelId, publicMessage.id, JSON.stringify([])],
+          [giveawayId, prize, winnersCount, targetMs, interaction.channelId, publicMessage.id, JSON.stringify([])],
           (err) => {
             if (err) console.error("Çekiliş veritabanına kaydedilemedi:", err);
           }
         );
 
-        // Zamanlayıcıyı başlat
+        // Zamanlayıcıyı kur
         const timeout = setTimeout(() => {
           endGiveaway(giveawayId);
         }, msRemaining);
