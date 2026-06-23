@@ -19,6 +19,8 @@ const db = new sqlite3.Database("./economy.db");
 
 // Bellekte anlık aktif Blackjack oyunlarını tutmak için Map
 const activeBlackjack = new Map();
+// Anonim Fısıltı Odalarını hafızada eşleştirmek için Map
+const activeWhispers = new Map(); 
 
 // Veritabanı genişletilmiş RPG şeması
 db.serialize(() => {
@@ -34,7 +36,12 @@ db.serialize(() => {
 });
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+  intents: [
+    GatewayIntentBits.Guilds, 
+    GatewayIntentBits.GuildMessages, 
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.DirectMessages // DM yanıtlarını yakalamak için eklendi
+  ]
 });
 
 // --- RPG MARKET AYARLARI ---
@@ -174,7 +181,7 @@ async function getMainMenuEmbed(userId) {
   return new EmbedBuilder()
     .setColor("#2b2d31")
     .setTitle("🤖 Devasa RPG & Eğlence İstasyonu")
-    .setDescription("Karakterinizi geliştirin, ormanda vahşi hayvanları avlayın veya lüks yemekler hazırlayın!")
+    .setDescription("Karakterinizi geliştirin, ormanda vahşi hayvanları avlayın volatile veya lüks yemekler hazırlayın!")
     .addFields(
       { name: "👤 Profil Detayları", value: `🌟 **Seviye:** ${user.level}\n✨ **XP:** ${user.xp}/${getRequiredXp(user.level)}`, inline: true },
       { name: "💰 Finansal Durum", value: `💵 **Cüzdan:** ${formatCoins(user.coins)} Jeton\n⚔️ **Silah:** ${activeItem}`, inline: true }
@@ -198,7 +205,6 @@ const backButtonRow = new ActionRowBuilder().addComponents(
 client.on("ready", async () => {
   console.log(`🤖 Bot ${client.user.tag} olarak başarıyla başlatıldı!`);
   try {
-    // /menu komutunu bota global olarak tanımlıyoruz
     await client.application.commands.set([
       {
         name: "menu",
@@ -211,11 +217,61 @@ client.on("ready", async () => {
   }
 });
 
-// --- MESAJ TABANLI ESKİ KOMUT MOTORU (!menu) ---
+// --- KOMUT, FEVRİ VE KÖPRÜ MESAJ MOTORU ---
 client.on("messageCreate", async msg => {
-  if (msg.author.bot || msg.content !== "!menu") return;
-  await ensureUser(msg.author.id);
-  return msg.reply({ embeds: [await getMainMenuEmbed(msg.author.id)], components: getMainMenuComponents() });
+  if (msg.author.bot) return;
+
+  // 1. KÖPRÜ: HEDEF KULLANICI FISILTI ODASINA YAZDIĞINDA (Thread -> DM)
+  if (msg.channel.isThread() && activeWhispers.has(msg.channel.id)) {
+    const bridge = activeWhispers.get(msg.channel.id);
+    if (msg.author.id === bridge.targetId) {
+      const initiator = await client.users.fetch(bridge.initiatorId).catch(() => null);
+      if (initiator) {
+        const embed = new EmbedBuilder()
+          .setColor("#9B59B6")
+          .setTitle("✉️ Fısıltı Odasından Mesaj Geldi")
+          .setDescription(`> ${msg.content}`)
+          .setFooter({ text: "Bu mesaja doğrudan DM'den yanıt vererek anonim cevap yollayabilirsiniz. Kapatmak için: !kapat" })
+          .setTimestamp();
+        await initiator.send({ embeds: [embed] }).catch(() => null);
+      }
+    }
+    return;
+  }
+
+  // 2. KÖPRÜ: BAŞLATAN YETKİLİ DM'DEN YANIT VERDİĞİNDE (DM -> Thread)
+  if (!msg.guild && activeWhispers.has(msg.author.id)) {
+    const bridge = activeWhispers.get(msg.author.id);
+
+    // Oturumu kapatma komutu kontrolü
+    if (msg.content.trim() === "!kapat") {
+      const thread = await client.channels.fetch(bridge.threadId).catch(() => null);
+      if (thread) {
+        await thread.send({ content: "🔒 *Bu fısıltı odası yetkili tarafından kapatıldı.*" }).catch(() => null);
+        await thread.setArchived(true).catch(() => null);
+      }
+      activeWhispers.delete(bridge.threadId);
+      activeWhispers.delete(msg.author.id);
+      return msg.reply("🔒 Fısıltı odası kapatıldı ve köprü güvenle imha edildi.");
+    }
+
+    const thread = await client.channels.fetch(bridge.threadId).catch(() => null);
+    if (thread) {
+      await thread.send({ content: `💬 **Gelen Yanıt:** ${msg.content}` });
+      await msg.react("✅").catch(() => null);
+    } else {
+      activeWhispers.delete(bridge.threadId);
+      activeWhispers.delete(msg.author.id);
+      return msg.reply("❌ Fısıltı odası bulunamadı veya silinmiş.");
+    }
+    return;
+  }
+
+  // ESKİ MESAJ TABANLI KOMUT MOTORU (!menu)
+  if (msg.content === "!menu") {
+    await ensureUser(msg.author.id);
+    return msg.reply({ embeds: [await getMainMenuEmbed(msg.author.id)], components: getMainMenuComponents() });
+  }
 });
 
 // --- ANA ETKİLEŞİM MOTORU ---
@@ -223,7 +279,6 @@ client.on("interactionCreate", async interaction => {
   const userId = interaction.user.id;
   await ensureUser(userId);
 
-  // --- MODERN SLASH KOMUTU YÖNETİMİ (/menu) ---
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName === "menu") {
       return interaction.reply({ embeds: [await getMainMenuEmbed(userId)], components: getMainMenuComponents() });
@@ -262,7 +317,7 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ embeds: [embed], components: [row1, row2, row3, backButtonRow] });
     }
 
-    // 🏹 AVCILIK LOBİSİ (HAYVAN SEÇİM EKRANI)
+    // 🏹 AVCILIK LOBİSİ
     if (interaction.customId === "hunt_menu_nav") {
       const user = await getUser(userId);
       const embed = new EmbedBuilder().setColor("#57F287").setTitle("🏹 Avcılık ve İz Sürücülük Ormanı")
@@ -277,11 +332,11 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId("hunt_animal_select").setPlaceholder("Avlanacak bir hedef seçin...").addOptions(options)), backButtonRow] });
     }
 
-    // 🥩 AV İŞLEME EVİ PANELİ (MUTFAK & KASAP)
+    // 🥩 AV İŞLEME EVİ PANELİ
     if (interaction.customId === "hunt_house_nav") {
       const inv = await getInventory(userId);
       const embed = new EmbedBuilder().setColor("#E67E22").setTitle("🥩 Av İşleme ve Kasap Atölyesi")
-        .setDescription("Avladığınız çiğ hayvanları burada satabilir, mutfakta pişirebilir/işleyebilir ya da yiyerek yüksek miktarda tecrübe puanı (XP) elde edebilirsiniz!");
+        .setDescription("Avladığınız çiğ hayvanları burada satabilir, mutfakta pişirebilir/işleyebilir ya da yiyerek yüksek miktarda tecrbe puanı (XP) elde edebilirsiniz!");
 
       const options = [];
       inv.forEach(row => {
@@ -309,7 +364,7 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId("hh_item_select").setPlaceholder("İşlem yapılacak av ürününü seçin...").addOptions(options)), backButtonRow] });
     }
 
-    // AV İŞLEME AKSİYON BUTON MOTORU (SAT, YE, İŞLE)
+    // AV İŞLEME AKSİYONLARI
     if (interaction.customId.startsWith("hhact_")) {
       const parts = interaction.customId.split("_");
       const action = parts[1];
@@ -354,7 +409,7 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ embeds: [embed], components: [backButtonRow] });
     }
 
-    // ESKİ MESLEKLER (Work & Beg)
+    // TEMEL MESLEKLER
     if (interaction.customId === "work" || interaction.customId === "beg") {
       const isWork = interaction.customId === "work";
       const min = isWork ? 100 : 5, max = isWork ? 400 : 50;
@@ -377,7 +432,7 @@ client.on("interactionCreate", async interaction => {
       });
     }
 
-    // --- GELECEK YENİLİK: GELİŞMİŞ GENEL & MODERASYON PANELİ ---
+    // --- MODERASYON & GENEL PANELİ ---
     if (interaction.customId === "nav_general") {
       const embed = new EmbedBuilder()
         .setColor("#5865F2")
@@ -411,7 +466,23 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ embeds: [embed], components: [row1, row2, row3, row4, backButtonRow] });
     }
 
-    // MODERASYON: TEMİZLİK TETİKLEYİCİ
+    // MODERASYON FORMAT BUTONLARI (FISILTI İÇİN ÖZEL)
+    if (interaction.customId.startsWith("whfmt_")) {
+      const parts = interaction.customId.split("_");
+      const type = parts[1]; // "normal" veya "embed"
+      const targetId = parts[2];
+
+      const modal = new ModalBuilder()
+        .setCustomId(`modal_wh_submit_${type}_${targetId}`)
+        .setTitle(type === "normal" ? "Normal Yazı Fısıltısı" : "Embed Formatında Fısıltı");
+
+      modal.addComponents(new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId("whisper_msg").setLabel("Fısıltı Mesajı İçeriği").setStyle(TextInputStyle.Paragraph).setRequired(true)
+      ));
+      return interaction.showModal(modal);
+    }
+
+    // MODERASYON: PURGE
     if (interaction.customId === "mod_purge_btn") {
       if (!interaction.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
         return interaction.reply({ content: "❌ Bu eylem için **Mesajları Yönet** yetkiniz olmalıdır.", ephemeral: true });
@@ -423,84 +494,50 @@ client.on("interactionCreate", async interaction => {
       return interaction.showModal(modal);
     }
 
-    // MODERASYON: KANAL KİLİTLEME
+    // KANAL KİLİTLE / AÇ
     if (interaction.customId === "mod_lock_btn") {
-      if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-        return interaction.reply({ content: "❌ Bu eylem için **Kanalları Yönet** yetkiniz olmalıdır.", ephemeral: true });
-      }
+      if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) return interaction.reply({ content: "❌ Yetkiniz yok.", ephemeral: true });
       await interaction.channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: false });
-      const embed = new EmbedBuilder().setColor("#ED4245").setTitle("🔒 Kanal Kilitlendi").setDescription(`Bu kanal <@${userId}> tarafından yazıya kapatıldı. Yöneticiler harici kimse yazamaz.`);
-      return interaction.update({ embeds: [embed], components: [backButtonRow] });
+      return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("🔒 Kanal Kilitlendi").setDescription(`Bu kanal <@${userId}> tarafından kapatıldı.`)], components: [backButtonRow] });
     }
-
-    // MODERASYON: KANAL KİLİDİNİ AÇMA
     if (interaction.customId === "mod_unlock_btn") {
-      if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
-        return interaction.reply({ content: "❌ Bu eylem için **Kanalları Yönet** yetkiniz olmalıdır.", ephemeral: true });
-      }
+      if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) return interaction.reply({ content: "❌ Yetkiniz yok.", ephemeral: true });
       await interaction.channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: null });
-      const embed = new EmbedBuilder().setColor("#57F287").setTitle("🔓 Kanal Kilidi Açıldı").setDescription("Kanal kilidi kaldırıldı. Herkes tekrar mesaj gönderebilir.");
-      return interaction.update({ embeds: [embed], components: [backButtonRow] });
+      return interaction.update({ embeds: [new EmbedBuilder().setColor("#57F287").setTitle("🔓 Kanal Kilidi Açıldı")], components: [backButtonRow] });
     }
 
-    // MODERASYON: KICK SEÇİM EKRANI
+    // KICK / BAN / TIMEOUT SEÇİM EKRANLARI
     if (interaction.customId === "mod_kick_btn") {
-      if (!interaction.member.permissions.has(PermissionFlagsBits.KickMembers)) {
-        return interaction.reply({ content: "❌ Bu eylem için **Üyeleri At** yetkiniz olmalıdır.", ephemeral: true });
-      }
-      const embed = new EmbedBuilder().setColor("#E67E22").setTitle("🥾 Sunucudan Üye Atma").setDescription("Lütfen alttaki menüden sunucudan atmak istediğiniz üyeyi aratıp seçin.");
-      const sm = new UserSelectMenuBuilder().setCustomId("menu_kick_user").setPlaceholder("Atılacak üyeyi seçin...");
-      return interaction.update({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sm), backButtonRow] });
+      if (!interaction.member.permissions.has(PermissionFlagsBits.KickMembers)) return interaction.reply({ content: "❌ Yetkiniz yok.", ephemeral: true });
+      return interaction.update({ embeds: [new EmbedBuilder().setColor("#E67E22").setTitle("🥾 Üye Atma")], components: [new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId("menu_kick_user")), backButtonRow] });
     }
-
-    // MODERASYON: BAN SEÇİM EKRANI
     if (interaction.customId === "mod_ban_btn") {
-      if (!interaction.member.permissions.has(PermissionFlagsBits.BanMembers)) {
-        return interaction.reply({ content: "❌ Bu eylem için **Üyeleri Yasakla** yetkiniz olmalıdır.", ephemeral: true });
-      }
-      const embed = new EmbedBuilder().setColor("#ED4245").setTitle("🔨 Sunucudan Yasaklama").setDescription("Lütfen alttaki menüden tamamen yasaklamak istediğiniz üyeyi seçin.");
-      const sm = new UserSelectMenuBuilder().setCustomId("menu_ban_user").setPlaceholder("Yasaklanacak üyeyi seçin...");
-      return interaction.update({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sm), backButtonRow] });
+      if (!interaction.member.permissions.has(PermissionFlagsBits.BanMembers)) return interaction.reply({ content: "❌ Yetkiniz yok.", ephemeral: true });
+      return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("🔨 Üye Yasaklama")], components: [new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId("menu_ban_user")), backButtonRow] });
     }
-
-    // MODERASYON: TIMEOUT SEÇİM EKRANI
     if (interaction.customId === "mod_timeout_btn") {
-      if (!interaction.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
-        return interaction.reply({ content: "❌ Bu eylem için **Üyeleri Sustur (Moderate Members)** yetkiniz olmalıdır.", ephemeral: true });
-      }
-      const embed = new EmbedBuilder().setColor("#ED4245").setTitle("⏳ Üyeye Sürgün (Timeout) Atma").setDescription("Zamanaşımına uğratmak ve susturmak istediğiniz üyeyi seçin.");
-      const sm = new UserSelectMenuBuilder().setCustomId("menu_timeout_user").setPlaceholder("Susturulacak üyeyi seçin...");
-      return interaction.update({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sm), backButtonRow] });
+      if (!interaction.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "❌ Yetkiniz yok.", ephemeral: true });
+      return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("⏳ Sürgün (Timeout)")], components: [new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId("menu_timeout_user")), backButtonRow] });
     }
-
-    // MODERASYON: TIMEOUT KALDIRMA SEÇİM EKRANI
     if (interaction.customId === "mod_untimeout_btn") {
-      if (!interaction.member.permissions.has(PermissionFlagsBits.ModerateMembers)) {
-        return interaction.reply({ content: "❌ Bu eylem için **Üyeleri Sustur (Moderate Members)** yetkiniz olmalıdır.", ephemeral: true });
-      }
-      const embed = new EmbedBuilder().setColor("#57F287").setTitle("🔊 Sürgün (Timeout) Kaldırma").setDescription("Susturulmasını iptal etmek istediğiniz üyeyi seçin.");
-      const sm = new UserSelectMenuBuilder().setCustomId("menu_untimeout_user").setPlaceholder("Sürgünü kaldırılacak üyeyi seçin...");
-      return interaction.update({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sm), backButtonRow] });
+      if (!interaction.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "❌ Yetkiniz yok.", ephemeral: true });
+      return interaction.update({ embeds: [new EmbedBuilder().setColor("#57F287").setTitle("🔊 Sürgün Kaldırma")], components: [new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId("menu_untimeout_user")), backButtonRow] });
     }
 
-    // MODERASYON: FISILTI ODASI SEÇİM EKRANI
+    // FISILTI SEÇİM EKRANI ANA TETİKLEYİCİ
     if (interaction.customId === "mod_whisper_btn") {
-      const embed = new EmbedBuilder().setColor("#9B59B6").setTitle("🤫 Gizli Fısıltı Odası Aç").setDescription("Sadece sizin ve seçeceğiniz kişinin görebileceği geçici, gizli bir alt başlık (Private Thread) açar.\n\nFısıltı odası kurmak istediğiniz üyeyi seçin:");
-      const sm = new UserSelectMenuBuilder().setCustomId("menu_whisper_user").setPlaceholder("Fısıldanacak üyeyi seçin...");
-      return interaction.update({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sm), backButtonRow] });
+      const embed = new EmbedBuilder().setColor("#9B59B6").setTitle("🤫 Gizli Fısıltı Odası Kur").setDescription("İletişim kurmak istediğiniz üyeyi seçin. Görüşme tamamen anonim bir köprü üzerinden yürütülecektir.");
+      return interaction.update({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId("menu_whisper_user")), backButtonRow] });
     }
 
-    // MODERASYON: BOT MESAJI YAZDIRMA NAVİGASYON
+    // SAY NAVİGASYON
     if (interaction.customId === "mod_say_nav") {
-      if (!interaction.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
-        return interaction.reply({ content: "❌ Bu eylem için **Mesajları Yönet** yetkiniz olmalıdır.", ephemeral: true });
-      }
-      const embed = new EmbedBuilder().setColor("#5865F2").setTitle("✍️ Bot Ağzından Mesaj Yazdırma").setDescription("Mesajın nasıl gönderilmesini istersiniz? Alttaki formatlardan birini seçin.");
+      if (!interaction.member.permissions.has(PermissionFlagsBits.ManageMessages)) return interaction.reply({ content: "❌ Yetkiniz yok.", ephemeral: true });
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId("say_normal_btn").setLabel("📝 Normal Yazı").setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId("say_embed_btn").setLabel("🖼️ Embed Mesaj").setStyle(ButtonStyle.Success)
       );
-      return interaction.update({ embeds: [embed], components: [row, backButtonRow] });
+      return interaction.update({ embeds: [new EmbedBuilder().setTitle("✍️ Bot Ağzından Mesaj Yazdır")], components: [row, backButtonRow] });
     }
 
     if (interaction.customId === "say_normal_btn") {
@@ -508,47 +545,47 @@ client.on("interactionCreate", async interaction => {
       modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("say_text").setLabel("Mesaj İçeriği").setStyle(TextInputStyle.Paragraph).setRequired(true)));
       return interaction.showModal(modal);
     }
-
     if (interaction.customId === "say_embed_btn") {
       const modal = new ModalBuilder().setCustomId("modal_say_embed").setTitle("Embed Mesaj Oluştur");
       modal.addComponents(
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("emb_title").setLabel("Embed Başlığı").setStyle(TextInputStyle.Short).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("emb_desc").setLabel("Açıklama / Metin").setStyle(TextInputStyle.Paragraph).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("emb_color").setLabel("Hex Renk Kodu (Örn: #ff0000)").setStyle(TextInputStyle.Short).setValue("#5865F2").setRequired(false))
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("emb_title").setLabel("Başlık").setStyle(TextInputStyle.Short).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("emb_desc").setLabel("Metin").setStyle(TextInputStyle.Paragraph).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("emb_color").setLabel("Hex Kodu").setStyle(TextInputStyle.Short).setValue("#5865F2"))
       );
       return interaction.showModal(modal);
     }
 
-    // ANA MENÜ BUTON İSTATİSTİKLERİ
+    // STATS
     if (interaction.customId === "gen_server") return interaction.update({ embeds: [new EmbedBuilder().setColor("#5865F2").setTitle(`📊 Sunucu: ${interaction.guild.name}`).addFields({ name: "Toplam Üye", value: `${interaction.guild.memberCount}` })], components: [backButtonRow] });
     if (interaction.customId === "gen_user") return interaction.update({ embeds: [new EmbedBuilder().setColor("#57F287").setTitle(`👤 Kullanıcı: ${interaction.user.username}`).setThumbnail(interaction.user.displayAvatarURL())], components: [backButtonRow] });
     if (interaction.customId === "gen_ping") return interaction.update({ embeds: [new EmbedBuilder().setColor("#FEE75C").setTitle("🏓 Gecikme").setDescription(`Hız: **${client.ws.ping}ms**`)], components: [backButtonRow] });
 
+    // SANDBOX
     if (interaction.customId === "nav_sandbox") {
       if (!interaction.member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("❌ Yetki Yok")], components: [backButtonRow] });
       return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("🛠️ Sandbox Modu")], components: [new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId("sandbox_user_select")), backButtonRow] });
     }
 
+    // ZİNDANLAR
     if (interaction.customId === "dungeon_menu") {
       const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("dg_easy").setLabel("🟢 Kolay").setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId("dg_medium").setLabel("🟡 Orta").setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId("dg_hard").setLabel("🔴 Zor").setStyle(ButtonStyle.Danger));
       return interaction.update({ embeds: [new EmbedBuilder().setColor("#E67E22").setTitle("🏰 Zindanlar")], components: [row, backButtonRow] });
     }
-
     if (interaction.customId.startsWith("dg_")) {
       const user = await getUser(userId); const difficulty = interaction.customId.replace("dg_", "");
       let reqLv = 1, chance = 0.7, prize = 300, xp = 100, pen = 100;
       if (difficulty === "medium") { reqLv = 3; chance = 0.5; prize = 1000; xp = 250; pen = 350; }
       else if (difficulty === "hard") { reqLv = 5; chance = 0.3; prize = 3000; xp = 600; pen = 1000; }
       if (user.level < reqLv) return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("❌ Seviyeniz Yetersiz")], components: [backButtonRow] });
-      if (Math.random() < chance) { await addCoins(userId, prize); const xr = await addXp(userId, xp); return interaction.update({ embeds: [new EmbedBuilder().setColor("#57F287").setTitle("⚔️ Zafer!").setDescription(`**+${formatCoins(prize)}** kazandınız.`)], components: [backButtonRow] }); }
+      if (Math.random() < chance) { await addCoins(userId, prize); await addXp(userId, xp); return interaction.update({ embeds: [new EmbedBuilder().setColor("#57F287").setTitle("⚔️ Zafer!").setDescription(`**+${formatCoins(prize)}** kazandınız.`)], components: [backButtonRow] }); }
       else { await addCoins(userId, -pen); return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("💀 Bozgun!").setDescription(`**-${formatCoins(pen)}** kaybettiniz.`)], components: [backButtonRow] }); }
     }
 
+    // KUMAR SALONU
     if (interaction.customId === "gamble_menu") {
       const sm = new StringSelectMenuBuilder().setCustomId("gamble_select").setPlaceholder("Oyun seçin...").addOptions([{ label: "Yazı Tura", value: "cf_lobby" }, { label: "Slot", value: "slots_lobby" }, { label: "Rulet", value: "roulette_lobby" }, { label: "Blackjack", value: "bj_lobby" }]);
       return interaction.update({ embeds: [new EmbedBuilder().setColor("#FEE75C").setTitle("🎰 Kumar Odası")], components: [new ActionRowBuilder().addComponents(sm), backButtonRow] });
     }
-
     if (interaction.customId === "cf_yazi" || interaction.customId === "cf_tura") {
       const modal = new ModalBuilder().setCustomId(`modal_cf_${interaction.customId}`).setTitle("Bahis Girişi");
       modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("bet_amount").setLabel("Bahis Gir").setStyle(TextInputStyle.Short)));
@@ -588,6 +625,7 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ embeds: [new EmbedBuilder().setTitle("Blackjack").setDescription(`Siz: ${calculateHand(game.playerHand)}`)], components: [actionRow] });
     }
 
+    // GÜNLÜK ÖDÜL
     if (interaction.customId === "daily") {
       const user = await getUser(userId); const cooldown = 86400000; const now = Date.now();
       if (now - user.last_daily < cooldown) {
@@ -599,6 +637,7 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ embeds: [new EmbedBuilder().setColor("#57F287").setTitle("📅 Günlük Ödül").setDescription(`Giriş ödülü olarak **+${formatCoins(dailyReward)}** Jeton eklendi!`)], components: [backButtonRow] });
     }
 
+    // MARKET & ENVANTER
     if (interaction.customId === "shop_menu") {
       const options = Object.entries(ITEMS).map(([id, it]) => ({ label: it.name, description: `${it.price} Jeton`, value: id }));
       return interaction.update({ embeds: [new EmbedBuilder().setTitle("🛒 Market")], components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId("shop_buy_select").addOptions(options)), backButtonRow] });
@@ -616,66 +655,24 @@ client.on("interactionCreate", async interaction => {
     }
   }
 
-  // --- STRING SELECT MENULERI ---
+  // --- STRING SELECT MENÜLERİ ---
   if (interaction.isStringSelectMenu()) {
     if (interaction.customId === "hunt_animal_select") {
-      const animalId = interaction.values[0];
-      const animal = ANIMALS[animalId];
-      const user = await getUser(userId);
-
-      if (user.level < animal.reqLv) {
-        return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("❌ Yetersiz Seviye").setDescription(`Bu hayvanın izini sürmek için en az **Seviye ${animal.reqLv}** olmalısınız!`)], components: [backButtonRow] });
-      }
-
-      let escapeChance = animal.escapeChance;
-      if (user.equipped_item === "rifle") escapeChance = Math.max(0.05, escapeChance - 0.15);
-
-      const isEscaped = Math.random() < escapeChance;
-      const embed = new EmbedBuilder().setTimestamp();
-
-      if (isEscaped) {
-        embed.setColor("#FEE75C").setTitle("💨 Av Elinizden Kaçtı!").setDescription(`**${animal.name}** son anda gürültüyü fark edip çalılıklara kaçtı! Takip başarısız.`);
-      } else {
-        await addItem(userId, `raw_${animalId}`);
-        const xpRes = await addXp(userId, animal.rawXp);
-        embed.setColor("#57F287").setTitle("🎯 Av Başarılı!")
-          .setDescription(`Harika bir atışla **${animal.name}** yakaladınız!\n\n📦 Malzeme **Av İşleme Evi** deposuna kaldırıldı.\n✨ **+${animal.rawXp} XP** kazanıldı.${xpRes.leveledUp ? `\n🎉 **Seviye Atladınız! Yeni Seviye: ${xpRes.level}**` : ""}`);
-      }
+      const animalId = interaction.values[0]; const animal = ANIMALS[animalId]; const user = await getUser(userId);
+      if (user.level < animal.reqLv) return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("❌ Yetersiz Seviye").setDescription(`Bu hayvanın izini sürmek için en az **Seviye ${animal.reqLv}** olmalısınız!`)], components: [backButtonRow] });
+      let escapeChance = animal.escapeChance; if (user.equipped_item === "rifle") escapeChance = Math.max(0.05, escapeChance - 0.15);
+      const isEscaped = Math.random() < escapeChance; const embed = new EmbedBuilder().setTimestamp();
+      if (isEscaped) embed.setColor("#FEE75C").setTitle("💨 Av Elinizden Kaçtı!").setDescription(`**${animal.name}** son anda kaçtı!`);
+      else { await addItem(userId, `raw_${animalId}`); await addXp(userId, animal.rawXp); embed.setColor("#57F287").setTitle("🎯 Av Başarılı!").setDescription(`**${animal.name}** yakaladınız!`); }
       return interaction.update({ embeds: [embed], components: [backButtonRow] });
     }
 
     if (interaction.customId === "hh_item_select") {
-      const itemId = interaction.values[0];
-      const isRaw = itemId.startsWith("raw_");
-      const baseId = itemId.replace("raw_", "").replace("proc_", "");
-      const animal = ANIMALS[baseId];
-
-      const inv = await getInventory(userId);
-      const matched = inv.find(r => r.itemId === itemId);
-      const qty = matched ? matched.quantity : 0;
-
+      const itemId = interaction.values[0]; const isRaw = itemId.startsWith("raw_"); const baseId = itemId.replace("raw_", "").replace("proc_", ""); const animal = ANIMALS[baseId]; const inv = await getInventory(userId); const matched = inv.find(r => r.itemId === itemId); const qty = matched ? matched.quantity : 0;
       if (qty <= 0) return interaction.update({ embeds: [new EmbedBuilder().setTitle("Ürün Kalmamış")], components: [backButtonRow] });
-
-      const embed = new EmbedBuilder().setColor("#3498DB").setTitle(`🎬 Ürün Yönetimi: ${isRaw ? `Çiğ ${animal.name}` : animal.processedName}`)
-        .setDescription(`Bu üründen deponuzda **${qty}** adet var. Ne yapmak istersiniz?`)
-        .addFields(
-          { name: "💰 Satış Fiyatı", value: `${formatCoins(isRaw ? animal.rawPrice : animal.processedPrice)} Jeton`, inline: true },
-          { name: "✨ Tüketim XP'si", value: `${isRaw ? animal.rawXp : animal.processedXp} XP`, inline: true }
-        );
-
-      if (isRaw) {
-        embed.addFields({ name: "🍳 İşleme Dönüşümü", value: `İşlendiğinde **${animal.processedName}** olur. Değeri katlanır!` });
-      }
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`hhact_sell_${itemId}`).setLabel("💰 1 Adet Sat").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`hhact_eat_${itemId}`).setLabel("🍖 1 Adet Ye").setStyle(ButtonStyle.Primary)
-      );
-
-      if (isRaw) {
-        row.addComponents(new ButtonBuilder().setCustomId(`hhact_proc_${itemId}`).setLabel("🍳 1 Adet İşle").setStyle(ButtonStyle.Danger));
-      }
-
+      const embed = new EmbedBuilder().setColor("#3498DB").setTitle(`🎬 Ürün Yönetimi: ${isRaw ? `Çiğ ${animal.name}` : animal.processedName}`).setDescription(`Stok: **${qty}** adet.`).addFields({ name: "💰 Satış Fiyatı", value: `${formatCoins(isRaw ? animal.rawPrice : animal.processedPrice)} Jeton`, inline: true }, { name: "✨ Tüketim XP'si", value: `${isRaw ? animal.rawXp : animal.processedXp} XP`, inline: true });
+      const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`hhact_sell_${itemId}`).setLabel("💰 Sat").setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId(`hhact_eat_${itemId}`).setLabel("🍖 Ye").setStyle(ButtonStyle.Primary));
+      if (isRaw) row.addComponents(new ButtonBuilder().setCustomId(`hhact_proc_${itemId}`).setLabel("🍳 İşle").setStyle(ButtonStyle.Danger));
       return interaction.update({ embeds: [embed], components: [row, backButtonRow] });
     }
 
@@ -694,180 +691,144 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ embeds: [new EmbedBuilder().setTitle("Başarılı").setDescription(`${it.name} satın alındı.`)], components: [backButtonRow] });
     }
     if (interaction.customId === "inv_equip_select") {
-      await setEquipItem(userId, interaction.values[0]);
-      return interaction.update({ embeds: [new EmbedBuilder().setTitle("Kuşanıldı")], components: [backButtonRow] });
+      await setEquipItem(userId, interaction.values[0]); return interaction.update({ embeds: [new EmbedBuilder().setTitle("Kuşanıldı")], components: [backButtonRow] });
     }
   }
 
-  // --- USER SELECT MENULERİ (MODERASYON & SANDBOX ENTEGRASYONU) ---
+  // --- USER SELECT MENÜLERİ ---
   if (interaction.isUserSelectMenu()) {
     if (interaction.customId === "sandbox_user_select") {
       const target = interaction.values[0]; const tu = await getUser(target);
       return interaction.update({ embeds: [new EmbedBuilder().setTitle("Sandbox").setDescription(`<@${target}> Parası: ${formatCoins(tu.coins)}`)], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`sb_edit_${target}`).setLabel("Düzenle").setStyle(ButtonStyle.Danger)), backButtonRow] });
     }
 
-    // MODERASYON AKSİYONU: KICK ETKİLEŞİMİ
-    if (interaction.customId === "menu_kick_user") {
-      if (!interaction.member.permissions.has(PermissionFlagsBits.KickMembers)) return interaction.reply({ content: "Yetkiniz yok.", ephemeral: true });
-      const targetId = interaction.values[0];
-      const member = await interaction.guild.members.fetch(targetId).catch(() => null);
-
-      if (!member) return interaction.update({ embeds: [new EmbedBuilder().setTitle("❌ Üye sunucuda bulunamadı.")], components: [backButtonRow] });
-      if (!member.kickable) return interaction.update({ embeds: [new EmbedBuilder().setTitle("❌ Bu üyeyi atmaya botun yetkisi yetmiyor.")], components: [backButtonRow] });
-
-      await member.kick(`Moderatör Paneli: ${interaction.user.tag}`);
-      const embed = new EmbedBuilder().setColor("#57F287").setTitle("🥾 Üye Başarıyla Atıldı").setDescription(`<@${targetId}> sunucudan tek tıkla uzaklaştırıldı.`);
-      return interaction.update({ embeds: [embed], components: [backButtonRow] });
-    }
-
-    // MODERASYON AKSİYONU: BAN ETKİLEŞİMİ
-    if (interaction.customId === "menu_ban_user") {
-      if (!interaction.member.permissions.has(PermissionFlagsBits.BanMembers)) return interaction.reply({ content: "Yetkiniz yok.", ephemeral: true });
-      const targetId = interaction.values[0];
-      const member = await interaction.guild.members.fetch(targetId).catch(() => null);
-
-      if (!member) return interaction.update({ embeds: [new EmbedBuilder().setTitle("❌ Üye sunucuda bulunamadı.")], components: [backButtonRow] });
-      if (!member.bannable) return interaction.update({ embeds: [new EmbedBuilder().setTitle("❌ Bu üyeyi yasaklamaya botun yetkisi yetmiyor.")], components: [backButtonRow] });
-
-      await member.ban({ reason: `Moderatör Paneli: ${interaction.user.tag}` });
-      const embed = new EmbedBuilder().setColor("#ED4245").setTitle("🔨 Üye Yasaklandı").setDescription(`<@${targetId}> kalıcı olarak banlandı.`);
-      return interaction.update({ embeds: [embed], components: [backButtonRow] });
-    }
-
-    // MODERASYON AKSİYONU: TIMEOUT TETİKLEYİCİSİ (MODALA GÖNDERİR)
-    if (interaction.customId === "menu_timeout_user") {
-      const targetId = interaction.values[0];
-      const modal = new ModalBuilder().setCustomId(`modal_timeout_submit_${targetId}`).setTitle("Sürgün Süresi ve Sebep");
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("timeout_time").setLabel("Süre (Dakika Cinsinden - Örn: 10)").setStyle(TextInputStyle.Short).setRequired(true)),
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("timeout_reason").setLabel("Sürgün Sebebi").setStyle(TextInputStyle.Short).setValue("Kural İhlali").setRequired(false))
-      );
-      return interaction.showModal(modal);
-    }
-
-    // MODERASYON AKSİYONU: TIMEOUT KALDIRMA
-    if (interaction.customId === "menu_untimeout_user") {
-      const targetId = interaction.values[0];
-      const member = await interaction.guild.members.fetch(targetId).catch(() => null);
-
-      if (!member) return interaction.update({ embeds: [new EmbedBuilder().setTitle("❌ Üye sunucuda bulunamadı.")], components: [backButtonRow] });
-      
-      await member.timeout(null, `Moderatör Paneli: ${interaction.user.tag}`);
-      const embed = new EmbedBuilder().setColor("#57F287").setTitle("🔊 Sürgün Kaldırıldı").setDescription(`<@${targetId}> üzerindeki susturulma başarıyla kaldırıldı ve ses telleri iyileşti.`);
-      return interaction.update({ embeds: [embed], components: [backButtonRow] });
-    }
-
-    // MODERASYON AKSİYONU: FISILTI ODASI TETİKLEYİCİSİ (MODALA GÖNDERİR)
+    // FISILTI KULLANICI SEÇİMİNDEN SONRA FORMAT EKRANI
     if (interaction.customId === "menu_whisper_user") {
       const targetId = interaction.values[0];
-      const modal = new ModalBuilder().setCustomId(`modal_whisper_submit_${targetId}`).setTitle("Fısıltı Mesajı Girişi");
+      const embed = new EmbedBuilder()
+        .setColor("#9B59B6")
+        .setTitle("🖼️ Fısıltı Formatı Seçin")
+        .setDescription(`<@${targetId}> kullanıcısına açılacak fısıltı odasındaki ilk mesajın biçimini seçin:`);
+
+      const formatRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`whfmt_normal_${targetId}`).setLabel("📝 Normal Yazı").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`whfmt_embed_${targetId}`).setLabel("🖼️ Embed Mesaj").setStyle(ButtonStyle.Success)
+      );
+
+      return interaction.update({ embeds: [embed], components: [formatRow, backButtonRow] });
+    }
+
+    // KICK / BAN / TIMEOUT AKSİYONLARI
+    if (interaction.customId === "menu_kick_user") {
+      if (!interaction.member.permissions.has(PermissionFlagsBits.KickMembers)) return interaction.reply({ content: "Yetkiniz yok.", ephemeral: true });
+      const targetId = interaction.values[0]; const member = await interaction.guild.members.fetch(targetId).catch(() => null);
+      if (!member || !member.kickable) return interaction.update({ embeds: [new EmbedBuilder().setTitle("❌ Başarısız")], components: [backButtonRow] });
+      await member.kick(`Panel: ${interaction.user.tag}`);
+      return interaction.update({ embeds: [new EmbedBuilder().setColor("#57F287").setTitle("🥾 Atıldı")], components: [backButtonRow] });
+    }
+    if (interaction.customId === "menu_ban_user") {
+      if (!interaction.member.permissions.has(PermissionFlagsBits.BanMembers)) return interaction.reply({ content: "Yetkiniz yok.", ephemeral: true });
+      const targetId = interaction.values[0]; const member = await interaction.guild.members.fetch(targetId).catch(() => null);
+      if (!member || !member.bannable) return interaction.update({ embeds: [new EmbedBuilder().setTitle("❌ Başarısız")], components: [backButtonRow] });
+      await member.ban({ reason: `Panel: ${interaction.user.tag}` });
+      return interaction.update({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("🔨 Yasaklandı")], components: [backButtonRow] });
+    }
+    if (interaction.customId === "menu_timeout_user") {
+      const targetId = interaction.values[0];
+      const modal = new ModalBuilder().setCustomId(`modal_timeout_submit_${targetId}`).setTitle("Sürgün Süresi");
       modal.addComponents(
-        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("whisper_msg").setLabel("İletilecek İlk Fısıltı").setStyle(TextInputStyle.Paragraph).setRequired(true))
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("timeout_time").setLabel("Süre (Dakika)").setStyle(TextInputStyle.Short).setRequired(true)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("timeout_reason").setLabel("Sebep").setStyle(TextInputStyle.Short).setValue("Kural İhlali"))
       );
       return interaction.showModal(modal);
+    }
+    if (interaction.customId === "menu_untimeout_user") {
+      const targetId = interaction.values[0]; const member = await interaction.guild.members.fetch(targetId).catch(() => null);
+      if (!member) return interaction.update({ embeds: [new EmbedBuilder().setTitle("❌ Bulunamadı")], components: [backButtonRow] });
+      await member.timeout(null);
+      return interaction.update({ embeds: [new EmbedBuilder().setColor("#57F287").setTitle("🔊 Sürgün Kaldırıldı")], components: [backButtonRow] });
     }
   }
 
   // --- MODAL SUBMIT (FORM GÖNDERİMLERİ) ---
   if (interaction.isModalSubmit()) {
-    // MODERASYON: MESAJ SİLME MOTORU
-    if (interaction.customId === "modal_purge") {
-      const amount = parseInt(interaction.fields.getTextInputValue("purge_amount"));
-      if (isNaN(amount) || amount < 1 || amount > 100) {
-        return interaction.reply({ content: "❌ Lütfen 1 ile 100 arasında geçerli bir sayı giriniz.", ephemeral: true });
-      }
-      await interaction.channel.bulkDelete(amount, true);
-      return interaction.reply({ content: `🧹 Başarıyla **${amount}** adet mesaj kanaldan temizlendi!`, ephemeral: true });
-    }
-
-    // MODERASYON: NORMAL YAZI MOTORU
-    if (interaction.customId === "modal_say_normal") {
-      const text = interaction.fields.getTextInputValue("say_text");
-      await interaction.channel.send({ content: text });
-      return interaction.reply({ content: "✅ Normal mesaj kanala gönderildi.", ephemeral: true });
-    }
-
-    // MODERASYON: EMBED YAZI MOTORU
-    if (interaction.customId === "modal_say_embed") {
-      const title = interaction.fields.getTextInputValue("emb_title");
-      const desc = interaction.fields.getTextInputValue("emb_desc");
-      let color = interaction.fields.getTextInputValue("emb_color") || "#5865F2";
-      if (!color.startsWith("#")) color = `#${color}`;
-
-      const userEmbed = new EmbedBuilder().setTitle(title).setDescription(desc).setColor(color).setTimestamp();
-      await interaction.channel.send({ embeds: [userEmbed] });
-      return interaction.reply({ content: "✅ Embed mesaj kanala gönderildi.", ephemeral: true });
-    }
-
-    // MODERASYON: SÜRGÜN (TIMEOUT) MOTORU
-    if (interaction.customId.startsWith("modal_timeout_submit_")) {
-      const targetId = interaction.customId.split("_")[3];
-      const minutes = parseInt(interaction.fields.getTextInputValue("timeout_time"));
-      const reason = interaction.fields.getTextInputValue("timeout_reason") || "Belirtilmedi";
-
-      if (isNaN(minutes) || minutes <= 0) {
-        return interaction.reply({ content: "❌ Geçersiz süre! Lütfen dakika cinsinden pozitif bir sayı girin.", ephemeral: true });
-      }
+    // MODERASYON: FISILTI ODASI OLUŞTURMA MOTORU (YENİLENEN ANA KISIM)
+    if (interaction.customId.startsWith("modal_wh_submit_")) {
+      const parts = interaction.customId.split("_");
+      const formatType = parts[3]; // "normal" veya "embed"
+      const targetId = parts[4];
+      const msgText = interaction.fields.getTextInputValue("whisper_msg");
 
       const member = await interaction.guild.members.fetch(targetId).catch(() => null);
       if (!member) return interaction.reply({ content: "❌ Üye sunucuda bulunamadı.", ephemeral: true });
 
       try {
-        await member.timeout(minutes * 60 * 1000, `Moderatör: ${interaction.user.tag} | Sebep: ${reason}`);
-        const embed = new EmbedBuilder().setColor("#ED4245").setTitle("⏳ Sürgün Başarıyla Uygulandı")
-          .setDescription(`<@${targetId}> adlı üye sunucuda susturuldu.\n\n⏱️ **Süre:** ${minutes} Dakika\n⚖️ **Sebep:** ${reason}`);
-        return interaction.reply({ embeds: [embed] });
-      } catch (err) {
-        return interaction.reply({ content: "❌ Bu üyeyi susturmaya botun yetkisi yetmiyor veya üye üst düzey yetkili.", ephemeral: true });
-      }
-    }
-
-    // MODERASYON: GİZLİ FISILTI ODASI (THREAD) MOTORU
-    if (interaction.customId.startsWith("modal_whisper_submit_")) {
-      const targetId = interaction.customId.split("_")[3];
-      const msgText = interaction.fields.getTextInputValue("whisper_msg");
-
-      const member = await interaction.guild.members.fetch(targetId).catch(() => null);
-      if (!member) return interaction.reply({ content: "❌ Fısıldanacak üye sunucudan çıkmış.", ephemeral: true });
-
-      try {
-        // Kanal içinde sadece moderatör ve hedefin katılabileceği gizli alt başlık açar (Type 12: Private Thread)
+        // Tamamen rastgele bir oda ismi kullanarak yetkilinin adını gizliyoruz
         const thread = await interaction.channel.threads.create({
-          name: `🤫 fısıltı-${member.user.username}`,
+          name: `🤫 gizli-fısıltı-${Math.floor(1000 + Math.random() * 9000)}`,
           autoArchiveDuration: 60,
-          type: 12, 
-          reason: `Fısıltı Odası: ${interaction.user.tag}`
+          type: 12, // Private Thread (Özel Alt Başlık)
+          reason: `Anonim İletişim Köprüsü`
         });
 
-        // Odaya tarafları ekle
-        await thread.members.add(interaction.user.id);
+        // Odaya SADECE hedef kullanıcıyı davet ediyoruz, başlatıcı eklenmiyor (Anonimlik)
         await thread.members.add(targetId);
 
-        const embed = new EmbedBuilder()
-          .setColor("#9B59B6")
-          .setTitle("🤫 Özel Fısıltı Odası Kuruldu")
-          .setDescription(`Bu hat sadece <@${interaction.user.id}> ve <@${targetId}> arasında tamamen gizlidir.\n\n💬 **İlk Mesaj:**\n> ${msgText}`)
-          .setTimestamp();
+        // Mesajı tercih edilen formatta odaya yolluyoruz
+        if (formatType === "normal") {
+          await thread.send({ content: `🔔 **Yeni bir anonim fısıltı mesajı aldınız!**\n\n${msgText}` });
+        } else {
+          const userEmbed = new EmbedBuilder()
+            .setColor("#9B59B6")
+            .setTitle("🤫 Anonim Fısıltı Mesajı")
+            .setDescription(msgText)
+            .setTimestamp();
+          await thread.send({ content: `<@${targetId}>`, embeds: [userEmbed] });
+        }
 
-        await thread.send({ content: `<@${targetId}>, senin için gizli bir fısıltı var!`, embeds: [embed] });
-        return interaction.reply({ content: `✅ Fısıltı odası güvenle oluşturuldu: ${thread}`, ephemeral: true });
+        // Çift taraflı eşleşmeyi haritaya (Map) kaydediyoruz
+        activeWhispers.set(thread.id, { initiatorId: interaction.user.id, targetId: targetId });
+        activeWhispers.set(interaction.user.id, { threadId: thread.id, targetId: targetId });
+
+        return interaction.reply({ content: `✅ Anonim fısıltı odası başarıyla açıldı ve ilk mesaj iletildi! Karşı taraf odaya yazdığında bot size DM'den bildirecek. Cevap vermek için bota DM atabilirsiniz. Oturumu kapatmak için DM'ye \`!kapat\` yazmanız yeterlidir.`, ephemeral: true });
       } catch (err) {
         console.error(err);
-        return interaction.reply({ content: "❌ Fısıltı odası açılamadı. Botun bu kanalda 'Alt Başlıkları Yönet' yetkisi açık olmalıdır.", ephemeral: true });
+        return interaction.reply({ content: "❌ Fısıltı odası açılamadı. Botun bu kanalda 'Alt Başlıkları Yönet' yetkisi olmalıdır.", ephemeral: true });
       }
     }
 
+    // DİĞER MODALLER
+    if (interaction.customId === "modal_purge") {
+      const amount = parseInt(interaction.fields.getTextInputValue("purge_amount"));
+      if (isNaN(amount) || amount < 1 || amount > 100) return interaction.reply({ content: "❌ Geçersiz miktar.", ephemeral: true });
+      await interaction.channel.bulkDelete(amount, true);
+      return interaction.reply({ content: `🧹 **${amount}** mesaj silindi.`, ephemeral: true });
+    }
+    if (interaction.customId === "modal_say_normal") {
+      await interaction.channel.send({ content: interaction.fields.getTextInputValue("say_text") });
+      return interaction.reply({ content: "✅ Gönderildi.", ephemeral: true });
+    }
+    if (interaction.customId === "modal_say_embed") {
+      const title = interaction.fields.getTextInputValue("emb_title"); const desc = interaction.fields.getTextInputValue("emb_desc");
+      let color = interaction.fields.getTextInputValue("emb_color") || "#5865F2"; if (!color.startsWith("#")) color = `#${color}`;
+      await interaction.channel.send({ embeds: [new EmbedBuilder().setTitle(title).setDescription(desc).setColor(color).setTimestamp()] });
+      return interaction.reply({ content: "✅ Gönderildi.", ephemeral: true });
+    }
+    if (interaction.customId.startsWith("modal_timeout_submit_")) {
+      const targetId = interaction.customId.split("_")[3]; const minutes = parseInt(interaction.fields.getTextInputValue("timeout_time")); const reason = interaction.fields.getTextInputValue("timeout_reason") || "Belirtilmedi";
+      if (isNaN(minutes) || minutes <= 0) return interaction.reply({ content: "❌ Geçersiz süre.", ephemeral: true });
+      const member = await interaction.guild.members.fetch(targetId).catch(() => null); if (!member) return interaction.reply({ content: "❌ Bulunamadı.", ephemeral: true });
+      await member.timeout(minutes * 60 * 1000, reason);
+      return interaction.reply({ embeds: [new EmbedBuilder().setColor("#ED4245").setTitle("⏳ Susturuldu").setDescription(`<@${targetId}>, ${minutes} dk susturuldu.`)] });
+    }
     if (interaction.customId.startsWith("modal_sb_set_")) {
-      const amt = parseInt(interaction.fields.getTextInputValue("new_coin_amount"));
-      await setCoins(interaction.customId.replace("modal_sb_set_", ""), isNaN(amt) ? 0 : amt);
+      const amt = parseInt(interaction.fields.getTextInputValue("new_coin_amount")); await setCoins(interaction.customId.replace("modal_sb_set_", ""), isNaN(amt) ? 0 : amt);
       return interaction.update({ embeds: [new EmbedBuilder().setTitle("Bakiye Güncellendi")], components: [backButtonRow] });
     }
 
-    // --- BURADAN AŞAĞISI KUMAR MODALLERİDİR ---
-    const user = await getUser(userId);
-    const bet = parseInt(interaction.fields.getTextInputValue("bet_amount"));
-    if (isNaN(bet) || bet < 100 || user.coins < bet) return interaction.update({ embeds: [new EmbedBuilder().setTitle("❌ Hatalı Bahis veya Yetersiz Jeton")], components: [backButtonRow] });
-
+    // KUMAR MODAL MATEMATİKLERİ
+    const user = await getUser(userId); const bet = parseInt(interaction.fields.getTextInputValue("bet_amount"));
+    if (isNaN(bet) || bet < 100 || user.coins < bet) return interaction.update({ embeds: [new EmbedBuilder().setTitle("❌ Hatalı Bahis")], components: [backButtonRow] });
     const embed = new EmbedBuilder().setTimestamp();
 
     if (interaction.customId.startsWith("modal_cf_")) {
@@ -886,11 +847,10 @@ client.on("interactionCreate", async interaction => {
       else { await addCoins(userId, -bet); embed.setColor("#ED4245").setTitle("Kaybettiniz"); }
     }
     if (interaction.customId === "modal_bj_start") {
-      const ph = [drawCard(), drawCard()], dh = [drawCard(), drawCard()];
-      activeBlackjack.set(userId, { bet, playerHand: ph, dealerHand: dh });
+      const ph = [drawCard(), drawCard()], dh = [drawCard(), drawCard()]; activeBlackjack.set(userId, { bet, playerHand: ph, dealerHand: dh });
       embed.setColor("#5865F2").setTitle("Blackjack Masası").setDescription(`Eliniz: ${ph.map(c => c.text).join(" ")} (${calculateHand(ph)})`);
-      const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("bj_hit").setLabel("Çek").setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId("bj_stand").setLabel("Dur").setStyle(ButtonStyle.Danger));
-      return interaction.showModal(modal);
+      const actionRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("bj_hit").setLabel("Çek").setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId("bj_stand").setLabel("Dur").setStyle(ButtonStyle.Danger));
+      return interaction.update({ embeds: [embed], components: [actionRow] });
     }
 
     const uu = await getUser(userId); embed.addFields({ name: "Cüzdan", value: `${formatCoins(uu.coins)}` });
