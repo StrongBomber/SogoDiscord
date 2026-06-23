@@ -7,6 +7,8 @@ const {
   ButtonStyle, 
   EmbedBuilder, 
   UserSelectMenuBuilder,
+  ChannelSelectMenuBuilder, // Yeni eklendi
+  ChannelType,              // Yeni eklendi
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle
@@ -115,7 +117,6 @@ client.on("interactionCreate", async interaction => {
   }
 
   if (interaction.isButton()) {
-    // !fısıltı mesajından sonra sadece kullanan kişinin paneli görmesini sağlayan tetikleyici
     if (interaction.customId === "wh_start_flow") {
       return interaction.reply({
         embeds: [new EmbedBuilder().setColor("#9B59B6").setTitle("🤫 Fısıldanacak Kullanıcıyı Seçin").setDescription("Lütfen anonim fısıltı göndermek istediğiniz kullanıcıyı aşağıdaki menüden seçin.")],
@@ -154,30 +155,48 @@ client.on("interactionCreate", async interaction => {
       return interaction.update({ content: "🔒 Fısıltı odası başarıyla kapatıldı ve arşivlendi.", embeds: [], components: [] });
     }
 
-    // 2 Tür Seçiminden Sonra Format Belirleme Butonları
+    // Yöntem Seçim Butonları Tetiklendiğinde
     if (interaction.customId.startsWith("whmethod_")) {
       const parts = interaction.customId.split("_");
       const method = parts[1]; // thread veya dm
       const targetId = parts[2];
 
-      return interaction.update({
-        embeds: [new EmbedBuilder().setColor("#9B59B6").setTitle("🖼️ Fısıltı Formatı Seçin").setDescription(`Mesajın görünüm biçimini seçin:`)],
-        components: [new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`whfmt_${method}_normal_${targetId}`).setLabel("📝 Normal Yazı").setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(`whfmt_${method}_embed_${targetId}`).setLabel("🖼️ Embed Mesaj").setStyle(ButtonStyle.Success)
-        )],
-        ephemeral: true
-      });
+      if (method === "dm") {
+        // DM modu seçildiyse direkt format adımına geç
+        return interaction.update({
+          embeds: [new EmbedBuilder().setColor("#9B59B6").setTitle("🖼️ Fısıltı Formatı Seçin").setDescription(`Mesajın görünüm biçimini seçin:`)],
+          components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`whfmt_dm_normal_${targetId}`).setLabel("📝 Normal Yazı").setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`whfmt_dm_embed_${targetId}`).setLabel("🖼️ Embed Mesaj").setStyle(ButtonStyle.Success)
+          )],
+          ephemeral: true
+        });
+      } else if (method === "thread") {
+        // Oda modu seçildiyse önce Kanal Seçim Menüsünü göster
+        return interaction.update({
+          embeds: [new EmbedBuilder().setColor("#9B59B6").setTitle("📁 Kanal Seçimi").setDescription("Fısıltı odasının (Thread) kurulacağı metin kanalını seçin:")],
+          components: [new ActionRowBuilder().addComponents(
+            new ChannelSelectMenuBuilder()
+              .setCustomId(`menu_whisper_channel_${targetId}`)
+              .setPlaceholder("Bir metin kanalı seçin...")
+              .addChannelTypes(ChannelType.GuildText)
+          )],
+          ephemeral: true
+        });
+      }
     }
 
-    // Format Seçildikten Sonra Modal Açma
+    // Format Seçildikten Sonra Modal Açma (DM veya Kanal id'li thread fark etmeksizin)
     if (interaction.customId.startsWith("whfmt_")) {
       const parts = interaction.customId.split("_"); 
       const method = parts[1]; // thread veya dm
       const type = parts[2]; // normal veya embed
       const targetId = parts[3];
+      const channelId = parts[4] || ""; // Sadece thread modunda doludur
       
-      const modal = new ModalBuilder().setCustomId(`modal_wh_submit_${method}_${type}_${targetId}`).setTitle(type === "normal" ? "Normal Yazı Fısıltısı" : "Embed Formatında Fısıltı");
+      const customModalId = `modal_wh_submit_${method}_${type}_${targetId}` + (channelId ? `_${channelId}` : "");
+      
+      const modal = new ModalBuilder().setCustomId(customModalId).setTitle(type === "normal" ? "Normal Yazı Fısıltısı" : "Embed Formatında Fısıltı");
       modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("whisper_msg").setLabel("Fısıltı Mesajı İçeriği").setStyle(TextInputStyle.Paragraph).setRequired(true)));
       return interaction.showModal(modal);
     }
@@ -186,11 +205,10 @@ client.on("interactionCreate", async interaction => {
   if (interaction.isUserSelectMenu()) {
     if (interaction.customId === "menu_whisper_user") {
       const targetId = interaction.values[0];
-      if (targetId === userId) return interaction.reply({ content: "❌ Kendinize fısıltı gönderemezsiniz.", ephemeral: true });
+      // Kendine atma engeli kaldırıldı.
 
-      // Kullanıcı seçildikten sonra Oda mı DM mi sorusu soruluyor
       return interaction.update({ 
-        embeds: [new EmbedBuilder().setColor("#9B59B6").setTitle("🔀 Gönderim Türü Seçin").setDescription(`<@${targetId}> kullanıcısına fısıltıyı nasıl iletmek istersiniz?\n\n**Oda Kurma:** Sunucuda ikinizin de erişebileceği (fakat sizin anonim kalacağınız) özel bir başlık odası açar.\n**DM (Direkt Mesaj):** Mesajı doğrudan kullanıcının özel mesaj kutusuna anonim olarak gönderir.`)], 
+        embeds: [new EmbedBuilder().setColor("#9B59B6").setTitle("🔀 Gönderim Türü Seçin").setDescription(`<@${targetId}> kullanıcısına fısıltıyı nasıl iletmek istersiniz?\n\n**Oda Kurma:** Belirleyeceğiniz kanalda ikinizin de erişebileceği özel bir başlık odası açar.\n**DM (Direkt Mesaj):** Mesajı doğrudan kullanıcının özel mesaj kutusuna anonim olarak gönderir.`)], 
         components: [new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`whmethod_thread_${targetId}`).setLabel("📁 Oda Kurma").setStyle(ButtonStyle.Primary), 
           new ButtonBuilder().setCustomId(`whmethod_dm_${targetId}`).setLabel("💬 DM Üzerinden").setStyle(ButtonStyle.Success)
@@ -200,13 +218,31 @@ client.on("interactionCreate", async interaction => {
     }
   }
 
+  // --- KANAL SEÇİM MENÜSÜ YAKALAYICI ---
+  if (interaction.isChannelSelectMenu()) {
+    if (interaction.customId.startsWith("menu_whisper_channel_")) {
+      const targetId = interaction.customId.replace("menu_whisper_channel_", "");
+      const channelId = interaction.values[0];
+
+      // Kanal seçildikten sonra format butonlarını göster ve kanal kimliğini butona göm
+      return interaction.update({
+        embeds: [new EmbedBuilder().setColor("#9B59B6").setTitle("🖼️ Fısıltı Formatı Seçin").setDescription(`Mesajın görünüm biçimini seçin:`)],
+        components: [new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`whfmt_thread_normal_${targetId}_${channelId}`).setLabel("📝 Normal Yazı").setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`whfmt_thread_embed_${targetId}_${channelId}`).setLabel("🖼️ Embed Mesaj").setStyle(ButtonStyle.Success)
+        )],
+        ephemeral: true
+      });
+    }
+  }
+
   if (interaction.isModalSubmit()) {
-    // İlk Fısıltı Mesajı Gönderildiğinde
     if (interaction.customId.startsWith("modal_wh_submit_")) {
       const parts = interaction.customId.split("_"); 
       const methodType = parts[3]; // thread veya dm
       const formatType = parts[4]; // normal veya embed
       const targetId = parts[5]; 
+      const channelId = parts[6];  // Sadece thread ise doludur
       const msgText = interaction.fields.getTextInputValue("whisper_msg");
       
       const member = await interaction.guild.members.fetch(targetId).catch(() => null); 
@@ -229,13 +265,19 @@ client.on("interactionCreate", async interaction => {
       // --- ODA KURMA MODU ---
       if (methodType === "thread") {
         try {
-          const thread = await interaction.channel.threads.create({ 
+          // Kullanıcının seçtiği hedef kanalı çekiyoruz
+          const targetChannel = await client.channels.fetch(channelId).catch(() => null);
+          if (!targetChannel || !targetChannel.isTextBased()) {
+            return interaction.reply({ content: "❌ Seçilen yazı kanalı bulunamadı veya erişilemez durumda.", ephemeral: true });
+          }
+
+          const thread = await targetChannel.threads.create({ 
             name: `🤫 fısıltı-${Math.floor(1000 + Math.random() * 9000)}`, 
             autoArchiveDuration: 60, 
-            type: 12 
+            type: 12 // Özel Alt Başlık (GuildPrivateThread)
           });
           
-          await thread.members.add(targetId);
+          await thread.members.add(targetId).catch(() => null);
           
           if (formatType === "normal") {
             await thread.send({ content: `🔔 **Yeni bir anonim fısıltı mesajı aldınız!**\n\n${msgText}` });
@@ -251,12 +293,12 @@ client.on("interactionCreate", async interaction => {
           
           return interaction.reply({ embeds: [buildBridgeEmbed(initialLogs, targetId)], components: [buildBridgeButtons()], ephemeral: true });
         } catch (err) { 
-          return interaction.reply({ content: "❌ Gizli başlık odası oluşturulurken bir hata oluştu. Yetkilerimi kontrol edin.", ephemeral: true }); 
+          return interaction.reply({ content: "❌ Gizli başlık odası oluşturulurken bir hata oluştu. Yetkilerimi ve kanal izinlerimi kontrol edin.", ephemeral: true }); 
         }
       }
     }
 
-    // Panele Yazılan Yanıtlar Gönderildiğinde (Sadece Oda Kurma modunda aktiftir)
+    // Panele Yazılan Yanıtlar Gönderildiğinde
     if (interaction.customId.startsWith("modal_wh_reply_submit_")) {
       const type = interaction.customId.replace("modal_wh_reply_submit_", ""); 
       const msgText = interaction.fields.getTextInputValue("whisper_reply_msg");
