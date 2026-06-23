@@ -20,7 +20,7 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
-// Asenkron Veritabanı Yardımcı Fonksiyonları
+// --- ASENKRON VERİTABANI YARDIMCI FONKSİYONLARI ---
 function ensureUser(id) {
   return new Promise((resolve, reject) => {
     db.get("SELECT * FROM users WHERE id = ?", [id], (err, row) => {
@@ -45,7 +45,16 @@ function addCoins(id, amount) {
   });
 }
 
-// Ortak Arayüz Bileşenleri
+function getUser(id) {
+  return new Promise((resolve, reject) => {
+    db.get("SELECT * FROM users WHERE id = ?", [id], (err, row) => {
+      if (err) return reject(err);
+      resolve(row);
+    });
+  });
+}
+
+// --- ORTAK ARAYÜZ BİLEŞENLERİ ---
 function getMainMenuEmbed() {
   return new EmbedBuilder()
     .setColor("#2b2d31")
@@ -79,7 +88,7 @@ const backButtonRow = new ActionRowBuilder().addComponents(
   new ButtonBuilder().setCustomId("back_to_main").setLabel("⬅️ Ana Menüye Dön").setStyle(ButtonStyle.Secondary)
 );
 
-// Mesaj Komutları
+// --- MESAJ KOMUTLARI ---
 client.on("messageCreate", async msg => {
   if (msg.author.bot) return;
 
@@ -92,8 +101,10 @@ client.on("messageCreate", async msg => {
   }
 });
 
-// Etkileşim (Button & Select Menu) Yönetimi
+// --- ETKİLEŞİM (BUTTON & SELECT MENU) YÖNETİMİ ---
 client.on("interactionCreate", async interaction => {
+  if (!interaction.isButton() && !interaction.isStringSelectMenu()) return;
+
   const userId = interaction.user.id;
   await ensureUser(userId);
 
@@ -108,27 +119,29 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (interaction.customId === "balance") {
-      db.get("SELECT coins FROM users WHERE id = ?", [userId], (_, row) => {
-        const embed = new EmbedBuilder()
-          .setColor("#5865F2")
-          .setTitle("💰 Hesap Cüzdanı")
-          .setDescription(`Mevcut bakiyeniz: **${row.coins}** jeton.`)
-          .setTimestamp();
+      const row = await getUser(userId);
+      const embed = new EmbedBuilder()
+        .setColor("#5865F2")
+        .setTitle("💰 Hesap Cüzdanı")
+        .setDescription(`Mevcut bakiyeniz: **${row ? row.coins : 0}** jeton.`)
+        .setTimestamp();
 
-        interaction.update({ embeds: [embed], components: [backButtonRow] });
-      });
-      return;
+      return interaction.update({ embeds: [embed], components: [backButtonRow] });
     }
 
-    // Kazanma mekanikleri
-    const rewards = { hunt: [50, 200, "🏹 Av Başarılı!"], work: [100, 400, "💼 Mesai Tamamlandı!"], beg: [5, 50, "🙏 Birileri Üç Beş Kuruş Attı!"] };
+    // Kazanma mekanikleri (Avlan, Çalış, Dilen)
+    const rewards = { 
+      hunt: [50, 200, "🏹 Av Başarılı!"], 
+      work: [100, 400, "💼 Mesai Tamamlandı!"], 
+      beg: [5, 50, "🙏 Birileri Üç Beş Kuruş Attı!"] 
+    };
 
     if (rewards[interaction.customId]) {
       const [min, max, title] = rewards[interaction.customId];
       const reward = Math.floor(Math.random() * (max - min + 1)) + min;
       
       await addCoins(userId, reward);
-      const user = await ensureUser(userId);
+      const user = await getUser(userId);
 
       const embed = new EmbedBuilder()
         .setColor("#57F287")
@@ -151,7 +164,7 @@ client.on("interactionCreate", async interaction => {
         .setPlaceholder("Bir oyun seçimi yapın...")
         .addOptions([
           { label: "Yazı Tura (Coinflip)", description: "%50 şansla paranı katla.", value: "coinflip", emoji: "🪙" },
-          { label: "Slot Makinesi (Slots)", description: Sembolleri eşleştir, büyük ödülü kap.", value: "slots", emoji: "🍒" }
+          { label: "Slot Makinesi (Slots)", description: "Sembolleri eşleştir, büyük ödülü kap.", value: "slots", emoji: "🍒" } // Hata buradaki tırnak eksikliğindeydi, düzeltildi!
         ]);
 
       const row = new ActionRowBuilder().addComponents(selectMenu);
@@ -159,16 +172,16 @@ client.on("interactionCreate", async interaction => {
     }
   }
 
-  // 2. SEÇİM MENÜSÜ ETKİLEŞİMLERİ
+  // 2. SEÇİM MENÜSÜ ETKİLEŞİMLERİ (KUMAR SİSTEMİ)
   if (interaction.isStringSelectMenu() && interaction.customId === "gamble_select") {
-    const user = await ensureUser(userId);
+    const user = await getUser(userId);
     const bet = 50;
 
-    if (user.coins < bet) {
+    if (!user || user.coins < bet) {
       const embed = new EmbedBuilder()
         .setColor("#ED4245")
         .setTitle("❌ Yetersiz Bakiye")
-        .setDescription(`Kumar oynamak için en az **${bet}** jetonunuz olmalıdır.\nMevcut bakiyeniz: **${user.coins}** jeton.`);
+        .setDescription(`Kumar oynamak için en az **${bet}** jetonunuz olmalıdır.\nMevcut bakiyeniz: **${user ? user.coins : 0}** jeton.`);
 
       return interaction.update({ embeds: [embed], components: [backButtonRow] });
     }
@@ -176,10 +189,11 @@ client.on("interactionCreate", async interaction => {
     const gameType = interaction.values[0];
     const embed = new EmbedBuilder().setTimestamp();
 
+    // --- YAZI TURA OYUNU ---
     if (gameType === "coinflip") {
       const win = Math.random() < 0.5;
       if (win) {
-        await addCoins(userId, bet); // Ödediği 50 hariç net +50 kazanç için (+100 verip -50 düşmek yerine direkt +50 ekliyoruz)
+        await addCoins(userId, bet);
         embed.setColor("#57F287")
              .setTitle("🪙 Yazı-Tura: Kazandınız!")
              .setDescription(`Para döndü ve doğru tahmin ettiniz! **+${bet}** jeton kazandınız.`);
@@ -191,6 +205,7 @@ client.on("interactionCreate", async interaction => {
       }
     } 
     
+    // --- SLOT MAKİNESİ OYUNU ---
     else if (gameType === "slots") {
       const emojis = ["🍎", "🍋", "🍒", "💎"];
       const s1 = emojis[Math.floor(Math.random() * emojis.length)];
@@ -219,8 +234,8 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
-    const updatedUser = await ensureUser(userId);
-    embed.addFields({ name: "Yeni Bakiyeniz", value: `💰 ${updatedUser.coins} jeton` });
+    const updatedUser = await getUser(userId);
+    embed.addFields({ name: "Yeni Bakiyeniz", value: `💰 ${updatedUser ? updatedUser.coins : 0} jeton` });
 
     return interaction.update({ embeds: [embed], components: [backButtonRow] });
   }
