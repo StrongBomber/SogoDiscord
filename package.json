@@ -1,0 +1,13 @@
+{
+  "name": "owo-discord-bot-v2",
+  "version": "2.0.0",
+  "description": "Advanced OwO-like economy bot",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1"
+  }
+}
